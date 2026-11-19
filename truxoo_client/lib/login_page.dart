@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'otp_page.dart';
 import 'client_signup_page.dart';
 
@@ -21,6 +22,7 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
   static const Duration _animationDuration = Duration(milliseconds: 800);
   static const Duration _staggerDelay = Duration(milliseconds: 200);
   static const Duration _transitionDuration = Duration(milliseconds: 500);
+
   static const double _largeScreenBreakpoint = 600;
   static const double _contentWidthRatio = 0.8;
   static const double _horizontalPaddingRatio = 0.05;
@@ -45,7 +47,7 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    
+
     // 1. Initialize Named Database
     try {
       _db = FirebaseFirestore.instanceFor(
@@ -91,6 +93,7 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
 
   void _validatePhoneNumber() {
     final phoneNumber = _contactNumberController.text.replaceAll(RegExp(r'[^\d]'), '');
+    // Enforces exactly 10 digits and validates it is a proper Indian number (starting with 6-9)
     final isValid = phoneNumber.length == _phoneNumberLength && RegExp(r'^[6-9]\d{9}$').hasMatch(phoneNumber);
 
     if (_isValidNumber != isValid) {
@@ -108,37 +111,14 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  // ==================== LOGIC: SIGN UP NAVIGATION ====================
-  // New function to handle the "Sign Up" button click
-  void _handleSignUpNavigation() {
-    final contact = _contactNumberController.text.replaceAll(RegExp(r'[^\d]'), '');
-
-    // Check if input is valid
-    if (!_isValidNumber || contact.length != _phoneNumberLength) {
-      _showErrorSnackBar("Please enter your 10-digit mobile number above to Sign Up");
-      if (mounted) _phoneFocusNode.requestFocus(); // Focus the text field
-      return;
-    }
-
-    // Navigate to OTP Page with isExistingUser = false (New User Flow)
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => OtpPage(
-          phoneNumber: contact, // ✅ Pass the actual number
-          isExistingUser: false, // ✅ Tells OtpPage to go to Registration
-        ),
-      ),
-    );
-  }
-
-  // ==================== LOGIC: LOGIN (SEND OTP) ====================
-  
+  // ==================== LOGIC: LOGIN & SIGN UP (SEND OTP) ====================
   void _handleNext() async {
     final contact = _contactNumberController.text.replaceAll(RegExp(r'[^\d]'), '');
-
+    
+    // Strictly enforce exactly 10 digits before proceeding
     if (!_isValidNumber || contact.length != _phoneNumberLength) {
       _showErrorSnackBar('Please enter a valid 10-digit phone number');
+      if (mounted) _phoneFocusNode.requestFocus(); 
       return;
     }
 
@@ -150,17 +130,15 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
       final formatted = "+91$raw";
       final searchNums = [raw, formatted];
       
-      final fieldNames = ['phoneNumber', 'phone_number', 'mobile', 'phone'];
-      
       print("🔍 [DEBUG] Checking DB '$databaseName' for: $searchNums");
 
-      // 1. CHECK DRIVERS COLLECTION (BLOCK THEM)
-      bool driverFound = false;
-      for (String field in fieldNames) {
-        if(driverFound) break;
-        final q = await _db.collection('drivers').where(field, whereIn: searchNums).limit(1).get();
-        if (q.docs.isNotEmpty) driverFound = true;
-      }
+      // 1. CHECK DRIVERS COLLECTION (BLOCK THEM) - Single optimized query
+      final driverQuery = await _db.collection('drivers')
+          .where('phone_number', whereIn: searchNums)
+          .limit(1)
+          .get();
+          
+      bool driverFound = driverQuery.docs.isNotEmpty;
 
       if (driverFound) {
         if (mounted) {
@@ -170,13 +148,13 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
         return;
       }
 
-      // 2. CHECK CLIENTS COLLECTION
-      bool clientFound = false;
-      for (String field in fieldNames) {
-        if(clientFound) break;
-        final q = await _db.collection('clients').where(field, whereIn: searchNums).limit(1).get();
-        if (q.docs.isNotEmpty) clientFound = true;
-      }
+      // 2. CHECK CLIENTS COLLECTION - Single optimized query
+      final clientQuery = await _db.collection('clients')
+          .where('phone_number', whereIn: searchNums)
+          .limit(1)
+          .get();
+          
+      bool clientFound = clientQuery.docs.isNotEmpty;
 
       // 3. NAVIGATE TO OTP PAGE
       if (mounted) {
@@ -187,7 +165,7 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
           PageRouteBuilder(
             pageBuilder: (_, __, ___) => OtpPage(
               phoneNumber: contact, 
-              isExistingUser: clientFound // Logic: True = Home, False = Signup
+              isExistingUser: clientFound 
             ),
             transitionsBuilder: (_, a, __, c) => FadeTransition(opacity: a, child: c),
             transitionDuration: _transitionDuration,
@@ -207,13 +185,12 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
   void _showErrorSnackBar(String message) {
     HapticFeedback.heavyImpact();
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(message), backgroundColor: Colors.red, 
+      content: Text(message), backgroundColor: Colors.red,
       behavior: SnackBarBehavior.floating, margin: const EdgeInsets.all(20)
     ));
   }
 
   // ==================== UI WIDGETS ====================
-
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
@@ -224,10 +201,6 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
       appBar: PreferredSize(
         preferredSize: Size.fromHeight(sizes['appBarHeight']!),
         child: AppBar(
-          leading: IconButton(
-            icon: Icon(Icons.arrow_back, size: sizes['appBarHeight']! > 55 ? 28 : 24),
-            onPressed: () => Navigator.of(context).pop(),
-          ),
           elevation: 0, backgroundColor: Colors.white,
         ),
       ),
@@ -282,9 +255,13 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
           controller: _contactNumberController,
           focusNode: _phoneFocusNode,
           keyboardType: TextInputType.phone,
-          maxLength: 11,
+          // Physically restricts the input length to exactly 10 digits
+          maxLength: 10,
           style: TextStyle(fontSize: sizes['inputFontSize'], fontWeight: FontWeight.w500),
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly, _PhoneNumberFormatter()],
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(10),
+          ],
           decoration: InputDecoration(
             counterText: '',
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.grey[300]!, width: 1.5)),
@@ -312,17 +289,17 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
             minimumSize: Size(w * _contentWidthRatio, sizes['buttonHeight']!),
           ),
           child: _isLoading
-              ? SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(_isValidNumber ? Colors.white : Colors.grey[600]!)))
-              : Text('Send OTP', style: TextStyle(color: _isValidNumber ? Colors.white : Colors.grey[600], fontSize: sizes['buttonFontSize'], fontWeight: FontWeight.w500)),
+            ? SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation(_isValidNumber ? Colors.white : Colors.grey[600]!)))
+            : Text('Send OTP', style: TextStyle(color: _isValidNumber ? Colors.white : Colors.grey[600], fontSize: sizes['buttonFontSize'], fontWeight: FontWeight.w500)),
         ),
       ),
       const SizedBox(height: 16),
       
-      // 2. Sign Up Link (Updated to use _handleSignUpNavigation)
+      // 2. Sign Up Link - Now shares the exact same secure checking logic
       FadeTransition(
         opacity: _fadeAnimation,
         child: TextButton(
-          onPressed: _handleSignUpNavigation, // <--- Use the new handler here!
+          onPressed: _isLoading ? null : _handleNext,
           child: RichText(
             text: TextSpan(
               style: TextStyle(fontSize: sizes['buttonFontSize']! - 2, color: Colors.grey[600]), 
@@ -335,15 +312,5 @@ class _LoginState extends State<Login> with TickerProviderStateMixin {
         ),
       ),
     ]);
-  }
-}
-
-class _PhoneNumberFormatter extends TextInputFormatter {
-  @override
-  TextEditingValue formatEditUpdate(TextEditingValue o, TextEditingValue n) {
-    final d = n.text.replaceAll(RegExp(r'[^\d]'), '');
-    if (d.length > 10) return o;
-    if (d.length > 5) return TextEditingValue(text: '${d.substring(0, 5)} ${d.substring(5)}', selection: TextSelection.collapsed(offset: d.length + 1));
-    return n;
   }
 }

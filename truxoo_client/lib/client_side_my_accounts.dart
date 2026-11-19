@@ -5,6 +5,13 @@ import 'package:back_button_interceptor/back_button_interceptor.dart';
 import 'client_side_home.dart';
 import 'onboarding_page.dart';
 
+// Firebase Imports
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_storage/firebase_storage.dart'; // ✅ Added for image uploads
+import 'package:cached_network_image/cached_network_image.dart';
+
 class MyAccountClient extends StatefulWidget {
   final String? currentProfileImagePath;
   final bool isLocalImage;
@@ -18,11 +25,11 @@ class MyAccountClient extends StatefulWidget {
     super.key, 
     this.currentProfileImagePath,
     this.isLocalImage = false,
-    this.clientName = "Guru Prasad Panda",
-    this.clientPhone = "8875658758",
-    this.clientEmail = "guru34@gmail.com",
-    this.companyName = "ABC Logistics",
-    this.companyRegNumber = "REG123456789",
+    this.clientName = "",
+    this.clientPhone = "",
+    this.clientEmail = "",
+    this.companyName = "",
+    this.companyRegNumber = "",
   });
 
   @override
@@ -35,18 +42,26 @@ class _MyAccountClientState extends State<MyAccountClient> {
   late String _clientEmail;
   late String _companyName;
   late String _companyRegNumber;
+  String? _networkProfileUrl;
   
-  final String _profilePicture = 'assets/client_image.webp';
+  final String _defaultProfilePicture = 'assets/client_imag_high.jpg';
   File? _newProfileImage;
   bool _isUsingLocalImage = false;
+  
   bool _isEditingProfile = false;
   bool _isEditingCompany = false;
+  bool _isLoading = true; 
   
   late TextEditingController _nameController;
   late TextEditingController _emailController;
   late TextEditingController _phoneController;
   late TextEditingController _companyNameController;
   late TextEditingController _companyRegController;
+
+  FirebaseFirestore get _firestore => FirebaseFirestore.instanceFor(
+    app: Firebase.app(),
+    databaseId: 'truxoodriver',
+  );
 
   @override
   void initState() {
@@ -62,6 +77,8 @@ class _MyAccountClientState extends State<MyAccountClient> {
     
     if (widget.currentProfileImagePath != null && widget.isLocalImage) {
       _newProfileImage = File(widget.currentProfileImagePath!);
+    } else if (widget.currentProfileImagePath != null && !widget.isLocalImage && widget.currentProfileImagePath!.startsWith('http')) {
+      _networkProfileUrl = widget.currentProfileImagePath;
     }
     
     _nameController = TextEditingController(text: _clientName);
@@ -69,6 +86,48 @@ class _MyAccountClientState extends State<MyAccountClient> {
     _phoneController = TextEditingController(text: _clientPhone);
     _companyNameController = TextEditingController(text: _companyName);
     _companyRegController = TextEditingController(text: _companyRegNumber);
+
+    _fetchUserData();
+  }
+
+  // ✅ FIXED: Null-safe data fetching
+  Future<void> _fetchUserData() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        DocumentSnapshot doc = await _firestore.collection('clients').doc(user.uid).get();
+        
+        if (doc.exists && mounted) {
+          final rawData = doc.data();
+          if (rawData == null) return;
+          Map<String, dynamic> data = rawData as Map<String, dynamic>;
+          
+          setState(() {
+            _clientName = data['fullName'] ?? _clientName;
+            _clientEmail = data['email'] ?? _clientEmail;
+            _clientPhone = data['phoneNumber'] ?? _clientPhone;
+            _companyName = data['company'] ?? data['company_name'] ?? _companyName;
+            _companyRegNumber = data['registrationNumber'] ?? data['company_reg_number'] ?? _companyRegNumber;
+            
+            if (data['photoUrl'] != null && data['photoUrl'].toString().isNotEmpty) {
+              _networkProfileUrl = data['photoUrl'];
+              _isUsingLocalImage = false;
+            }
+
+            _nameController.text = _clientName;
+            _emailController.text = _clientEmail;
+            _phoneController.text = _clientPhone;
+            _companyNameController.text = _companyName;
+            _companyRegController.text = _companyRegNumber;
+            
+            _isLoading = false;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint("Error fetching user data: $e");
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   @override
@@ -82,31 +141,32 @@ class _MyAccountClientState extends State<MyAccountClient> {
     super.dispose();
   }
 
-  // Back button interceptor - handles hardware back button
   bool _backButtonInterceptor(bool stopDefaultButtonEvent, RouteInfo info) {
     if (_isEditingProfile || _isEditingCompany) {
       _showUnsavedChangesDialog();
-      return true; // Prevent default back behavior
+      return true;
     }
     _goToHome();
-    return true; // Prevent default back behavior
+    return true;
   }
 
-  // Navigate to home without checking for unsaved changes
   void _goToHome() {
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
         builder: (context) => ClientSideHome(
-          displayName: _nameController.text,
-          displayProfilePicture: _newProfileImage?.path ?? widget.currentProfileImagePath ?? 'assets/client_image.webp',
+          displayName: _clientName,
+          displayProfilePicture: _newProfileImage?.path ?? _networkProfileUrl ?? 'assets/client_imag_high.jpg',
           isUsingLocalImage: _isUsingLocalImage,
+          clientEmail: _clientEmail,
+          clientPhone: _clientPhone,
+          companyName: _companyName,
+          companyRegNumber: _companyRegNumber,
         ),
       ),
     );
   }
 
-  // Navigate to home with unsaved changes check (for AppBar back button)
   void _navigateToHome() {
     if (_isEditingProfile || _isEditingCompany) {
       _showUnsavedChangesDialog();
@@ -117,7 +177,7 @@ class _MyAccountClientState extends State<MyAccountClient> {
   
   Future<void> _pickImage() async {
     final ImagePicker picker = ImagePicker();
-    final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+    final XFile? image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 70);
     
     if (image != null) {
       setState(() {
@@ -127,49 +187,103 @@ class _MyAccountClientState extends State<MyAccountClient> {
     }
   }
 
-  void _saveProfileChanges() {
-    setState(() {
-      _clientName = _nameController.text;
-      _clientPhone = _phoneController.text;
-      _clientEmail = _emailController.text;
-      _isEditingProfile = false;
-    });
+  // ✅ FIXED: Integrated Validation and Firebase Storage Upload
+  Future<void> _saveProfileChanges() async {
+    final name = _nameController.text.trim();
+    final phone = _phoneController.text.trim();
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Profile updated successfully'),
-        backgroundColor: Colors.green,
-        duration: Duration(seconds: 1),
-      ),
-    );
+    if (name.isEmpty || phone.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Name and Phone cannot be empty'), backgroundColor: Colors.red)
+      );
+      return;
+    }
 
-    Future.delayed(const Duration(milliseconds: 1200), () {
-      if (mounted) {
-        _goToHome();
+    setState(() => _isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        String? updatedPhotoUrl = _networkProfileUrl;
+
+        // Upload to Storage if a new image was picked
+        if (_newProfileImage != null && _isUsingLocalImage) {
+          final storageRef = FirebaseStorage.instance.ref().child('client_profiles/${user.uid}.jpg');
+          await storageRef.putFile(_newProfileImage!);
+          updatedPhotoUrl = await storageRef.getDownloadURL();
+        }
+
+        await _firestore.collection('clients').doc(user.uid).update({
+          'fullName': name,
+          'phoneNumber': phone,
+          'email': _emailController.text.trim(),
+          if (updatedPhotoUrl != null) 'photoUrl': updatedPhotoUrl,
+        });
+        
+        setState(() {
+          _clientName = name;
+          _clientPhone = phone;
+          _clientEmail = _emailController.text;
+          _networkProfileUrl = updatedPhotoUrl;
+          _isEditingProfile = false;
+          _isLoading = false;
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile updated successfully'), backgroundColor: Colors.green));
+        }
       }
-    });
+    } catch (e) {
+      setState(() => _isLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
+      }
+    }
   }
 
-  void _saveCompanyChanges() {
-    setState(() {
-      _companyName = _companyNameController.text;
-      _companyRegNumber = _companyRegController.text;
-      _isEditingCompany = false;
-    });
+  Future<void> _saveCompanyChanges() async {
+    if (_companyNameController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Company name cannot be empty'), backgroundColor: Colors.red));
+      return;
+    }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Company details updated successfully'),
-        backgroundColor: Colors.green,
-        duration: Duration(seconds: 1),
-      ),
-    );
+    setState(() => _isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        await _firestore.collection('clients').doc(user.uid).update({
+          'company': _companyNameController.text.trim(),
+          'registrationNumber': _companyRegController.text.trim(),
+        });
 
-    Future.delayed(const Duration(milliseconds: 1200), () {
-      if (mounted) {
-        _goToHome(); // Fixed: Now passes profile data
+        setState(() {
+          _companyName = _companyNameController.text;
+          _companyRegNumber = _companyRegController.text;
+          _isEditingCompany = false;
+          _isLoading = false;
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Company details updated'), backgroundColor: Colors.green));
+        }
       }
-    });
+    } catch (e) {
+      setState(() => _isLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
+      }
+    }
+  }
+
+  // --- UI Components ---
+
+  ImageProvider _getProfileImage() {
+    if (_newProfileImage != null) {
+      return FileImage(_newProfileImage!);
+    } else if (_networkProfileUrl != null && _networkProfileUrl!.isNotEmpty) {
+      return CachedNetworkImageProvider(_networkProfileUrl!);
+    } else {
+      return AssetImage(_defaultProfilePicture);
+    }
   }
 
   Future<void> _showUnsavedChangesDialog() async {
@@ -179,37 +293,14 @@ class _MyAccountClientState extends State<MyAccountClient> {
       builder: (BuildContext dialogContext) {
         return AlertDialog(
           title: const Text('Unsaved Changes'),
-          content: const Text('You have unsaved changes. Do you want to discard them?'),
+          content: const Text('Discard changes and leave?'),
           actions: <Widget>[
-            TextButton(
-              child: const Text('Cancel'),
-              onPressed: () {
-                Navigator.of(dialogContext).pop();
-              },
-            ),
+            TextButton(child: const Text('Cancel'), onPressed: () => Navigator.of(dialogContext).pop()),
             TextButton(
               child: const Text('Discard', style: TextStyle(color: Colors.red)),
               onPressed: () {
                 Navigator.of(dialogContext).pop();
-                // Discard changes - go back to original values
-                Navigator.pushReplacement(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => ClientSideHome(
-                      displayName: widget.clientName,
-                      displayProfilePicture: widget.currentProfileImagePath ?? 'assets/client_image.webp',
-                      isUsingLocalImage: widget.isLocalImage,
-                    ),
-                  ),
-                );
-              },
-            ),
-            TextButton(
-              child: const Text('Save', style: TextStyle(color: Colors.green)),
-              onPressed: () {
-                Navigator.of(dialogContext).pop();
-                if (_isEditingProfile) _saveProfileChanges();
-                if (_isEditingCompany) _saveCompanyChanges();
+                _goToHome();
               },
             ),
           ],
@@ -225,417 +316,219 @@ class _MyAccountClientState extends State<MyAccountClient> {
     
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          'My Account',
-          style: TextStyle(
-            fontSize: isLargeScreen ? 24 : 20,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: _navigateToHome,
-        ),
+        title: Text('My Account', style: TextStyle(fontWeight: FontWeight.bold, fontSize: isLargeScreen ? 24 : 20)),
+        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: _navigateToHome),
       ),
-      body: SingleChildScrollView(
-        child: Padding(
-          padding: EdgeInsets.all(isLargeScreen ? 24.0 : 16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Profile Section
-              Card(
-                elevation: 4,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Padding(
-                  padding: EdgeInsets.all(isLargeScreen ? 24.0 : 16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            'Profile Information',
-                            style: TextStyle(
-                              fontSize: isLargeScreen ? 20 : 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          IconButton(
-                            icon: Icon(
-                              _isEditingProfile ? Icons.save : Icons.edit,
-                              color: Colors.blue,
-                            ),
-                            onPressed: () {
-                              if (_isEditingProfile) {
-                                _saveProfileChanges();
-                              } else {
-                                setState(() {
-                                  _isEditingProfile = true;
-                                });
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      Center(
-                        child: Stack(
-                          children: [
-                            CircleAvatar(
-                              radius: isLargeScreen ? 60 : 50,
-                              backgroundColor: Colors.white,
-                              backgroundImage: _newProfileImage != null
-                                  ? FileImage(_newProfileImage!)
-                                  : _isUsingLocalImage && widget.currentProfileImagePath != null
-                                      ? FileImage(File(widget.currentProfileImagePath!))
-                                      : AssetImage(_profilePicture) as ImageProvider,
-                            ),
-                            if (_isEditingProfile)
-                              Positioned(
-                                right: 0,
-                                bottom: 0,
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    color: Colors.blue,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: Colors.white,
-                                      width: 2,
-                                    ),
-                                  ),
-                                  child: IconButton(
-                                    icon: const Icon(
-                                      Icons.camera_alt,
-                                      color: Colors.white,
-                                    ),
-                                    onPressed: _pickImage,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      _buildProfileField(
-                        'Name',
-                        _clientName,
-                        _nameController,
-                        isLargeScreen,
-                        isEditing: _isEditingProfile,
-                      ),
-                      _buildProfileField(
-                        'Phone',
-                        _clientPhone,
-                        _phoneController,
-                        isLargeScreen,
-                        isEditing: _isEditingProfile,
-                        keyboardType: TextInputType.phone,
-                      ),
-                      _buildProfileField(
-                        'Email',
-                        _clientEmail,
-                        _emailController,
-                        isLargeScreen,
-                        isEditing: _isEditingProfile,
-                        keyboardType: TextInputType.emailAddress,
-                      ),
-                    ],
-                  ),
-                ),
+      body: _isLoading 
+        ? const Center(child: CircularProgressIndicator(color: Colors.black)) 
+        : SingleChildScrollView(
+            child: Padding(
+              padding: EdgeInsets.all(isLargeScreen ? 24.0 : 16.0),
+              child: Column(
+                children: [
+                  // Profile Information Card
+                  _buildProfileCard(isLargeScreen),
+                  const SizedBox(height: 16),
+                  // Company Details Card
+                  _buildCompanyCard(isLargeScreen),
+                  const SizedBox(height: 16),
+                  // Dangerous Actions Card
+                  _buildActionsCard(isLargeScreen),
+                  const SizedBox(height: 24),
+                  Text('App Version: 1.0.0', style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+                  const SizedBox(height: 24),
+                ],
               ),
-              
-              SizedBox(height: isLargeScreen ? 24 : 16),
-              
-              // Company Details Section
-              Card(
-                elevation: 4,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Padding(
-                  padding: EdgeInsets.all(isLargeScreen ? 24.0 : 16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            'Company Details',
-                            style: TextStyle(
-                              fontSize: isLargeScreen ? 20 : 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          IconButton(
-                            icon: Icon(
-                              _isEditingCompany ? Icons.save : Icons.edit,
-                              color: Colors.blue,
-                            ),
-                            onPressed: () {
-                              if (_isEditingCompany) {
-                                _saveCompanyChanges();
-                              } else {
-                                setState(() {
-                                  _isEditingCompany = true;
-                                });
-                              }
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      _buildProfileField(
-                        'Company Name',
-                        _companyName,
-                        _companyNameController,
-                        isLargeScreen,
-                        isEditing: _isEditingCompany,
-                      ),
-                      _buildProfileField(
-                        'Registration Number',
-                        _companyRegNumber,
-                        _companyRegController,
-                        isLargeScreen,
-                        isEditing: _isEditingCompany,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              
-              SizedBox(height: isLargeScreen ? 24 : 16),
-              
-              // Account Actions Section
-              Card(
-                elevation: 4,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Padding(
-                  padding: EdgeInsets.all(isLargeScreen ? 24.0 : 16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Account Actions',
-                        style: TextStyle(
-                          fontSize: isLargeScreen ? 20 : 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        leading: const Icon(Icons.lock, color: Colors.blue),
-                        title: const Text('Change Password'),
-                        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                        onTap: () {
-                          // Navigate to change password screen
-                        },
-                      ),
-                      const Divider(),
-                      ListTile(
-                        leading: const Icon(Icons.support_agent, color: Colors.green),
-                        title: const Text('Contact Support'),
-                        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                        onTap: () {
-                          // Navigate to support screen or launch phone/email
-                        },
-                      ),
-                      const Divider(),
-                      ListTile(
-                        leading: const Icon(Icons.logout, color: Colors.red),
-                        title: const Text('Logout'),
-                        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                        onTap: () {
-                          _showLogoutConfirmationDialog(context, isLargeScreen);
-                        },
-                      ),
-                      const Divider(),
-                      ListTile(
-                        leading: const Icon(Icons.delete_forever, color: Colors.red),
-                        title: const Text('Delete Account'),
-                        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                        onTap: () {
-                          _showDeleteAccountConfirmationDialog(context, isLargeScreen);
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              
-              SizedBox(height: isLargeScreen ? 24 : 16),
-              
-              // App Version
-              Center(
-                child: Text(
-                  'App Version: 1.0.0',
-                  style: TextStyle(
-                    color: Colors.grey[600],
-                    fontSize: isLargeScreen ? 14 : 12,
-                  ),
-                ),
-              ),
-              SizedBox(height: isLargeScreen ? 24 : 16),
-            ],
+            ),
           ),
+    );
+  }
+
+  Widget _buildProfileCard(bool isLargeScreen) {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Profile Information', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                IconButton(
+                  icon: Icon(_isEditingProfile ? Icons.check_circle : Icons.edit, color: _isEditingProfile ? Colors.green : Colors.blue),
+                  onPressed: () => _isEditingProfile ? _saveProfileChanges() : setState(() => _isEditingProfile = true),
+                ),
+              ],
+            ),
+            Center(
+              child: Stack(
+                children: [
+                  CircleAvatar(
+                    radius: 50,
+                    backgroundImage: _getProfileImage(),
+                  ),
+                  if (_isEditingProfile)
+                    Positioned(
+                      bottom: 0, right: 0,
+                      child: CircleAvatar(
+                        backgroundColor: Colors.blue,
+                        radius: 18,
+                        child: IconButton(
+                          icon: const Icon(Icons.camera_alt, size: 18, color: Colors.white),
+                          onPressed: _pickImage,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            _buildField('Full Name', _nameController, _isEditingProfile),
+            _buildField('Phone Number', _phoneController, _isEditingProfile, keyboardType: TextInputType.phone),
+            _buildField('Email', _emailController, _isEditingProfile, keyboardType: TextInputType.emailAddress),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildProfileField(
-    String label,
-    String value,
-    TextEditingController? controller,
-    bool isLargeScreen, {
-    bool isEditing = false,
-    TextInputType keyboardType = TextInputType.text,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16.0),
+  Widget _buildCompanyCard(bool isLargeScreen) {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Company Details', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                IconButton(
+                  icon: Icon(_isEditingCompany ? Icons.check_circle : Icons.edit, color: _isEditingCompany ? Colors.green : Colors.blue),
+                  onPressed: () => _isEditingCompany ? _saveCompanyChanges() : setState(() => _isEditingCompany = true),
+                ),
+              ],
+            ),
+            _buildField('Company Name', _companyNameController, _isEditingCompany),
+            _buildField('Registration Number', _companyRegController, _isEditingCompany),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionsCard(bool isLargeScreen) {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: isLargeScreen ? 16 : 14,
-              color: Colors.grey[600],
-            ),
+          ListTile(
+            leading: const Icon(Icons.logout, color: Colors.red),
+            title: const Text('Logout'),
+            onTap: () => _showLogoutConfirmationDialog(context),
           ),
-          const SizedBox(height: 4),
-          if (isEditing && controller != null)
-            TextField(
-              controller: controller,
-              keyboardType: keyboardType,
-              decoration: InputDecoration(
-                contentPadding: EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: isLargeScreen ? 16 : 12,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: Colors.grey.shade300),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: Colors.blue, width: 2),
-                ),
-              ),
-              style: TextStyle(
-                fontSize: isLargeScreen ? 16 : 14,
-              ),
-            )
-          else
-            Container(
-              width: double.infinity,
-              padding: EdgeInsets.symmetric(
-                horizontal: 16,
-                vertical: isLargeScreen ? 16 : 12,
-              ),
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.grey.shade300),
-                borderRadius: BorderRadius.circular(8),
-                color: Colors.grey.shade50,
-              ),
-              child: Text(
-                controller?.text ?? value,
-                style: TextStyle(
-                  fontSize: isLargeScreen ? 16 : 14,
-                ),
-              ),
-            ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.delete_forever, color: Colors.red),
+            title: const Text('Delete Account'),
+            onTap: () => _showDeleteAccountConfirmationDialog(context),
+          ),
         ],
       ),
     );
   }
-  
-  Future<void> _showLogoutConfirmationDialog(BuildContext context, bool isLargeScreen) async {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          title: const Text('Confirm Logout'),
-          content: const Text('Are you sure you want to logout?'),
-          actions: <Widget>[
-            TextButton(
-              child: const Text('Cancel'),
-              onPressed: () {
-                Navigator.of(dialogContext).pop();
-              },
-            ),
-            TextButton(
-              child: const Text('Logout', style: TextStyle(color: Colors.red)),
-              onPressed: () {
-                Navigator.of(dialogContext).pop();
-                Navigator.of(context).pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (context) => const OnboardingPage()),
-                  (Route<dynamic> route) => false,
-                );
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-  
-  Future<void> _showDeleteAccountConfirmationDialog(BuildContext context, bool isLargeScreen) async {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          title: const Text('Delete Account'),
-          content: const Text(
-            'Are you sure you want to delete your account? This action cannot be undone and all your data will be permanently lost.',
-            style: TextStyle(height: 1.5),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: const Text('Cancel'),
-              onPressed: () {
-                Navigator.of(dialogContext).pop();
-              },
-            ),
-            TextButton(
-              child: const Text('Delete Account', style: TextStyle(color: Colors.red)),
-              onPressed: () {
-                Navigator.of(dialogContext).pop();
-                _performAccountDeletion();
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-  
-  void _performAccountDeletion() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Account deleted successfully'),
-        backgroundColor: Colors.green,
+
+  Widget _buildField(String label, TextEditingController controller, bool isEditing, {TextInputType keyboardType = TextInputType.text}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+          const SizedBox(height: 4),
+          isEditing 
+            ? TextField(
+                controller: controller,
+                keyboardType: keyboardType,
+                decoration: InputDecoration(
+                  isDense: true,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              )
+            : Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(controller.text.isEmpty ? 'Not Provided' : controller.text),
+              ),
+        ],
       ),
     );
-    
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (context) => const OnboardingPage()),
-          (Route<dynamic> route) => false,
-        );
-      }
-    });
+  }
+
+  // --- Confirmation Dialogs ---
+
+  Future<void> _showLogoutConfirmationDialog(BuildContext context) async {
+    return showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Logout'),
+        content: const Text('Are you sure you want to sign out?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(
+            child: const Text('Logout', style: TextStyle(color: Colors.red)),
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+              if (mounted) {
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (context) => const OnboardingPage()), (r) => false
+                );
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showDeleteAccountConfirmationDialog(BuildContext context) async {
+    return showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Account', style: TextStyle(color: Colors.red)),
+        content: const Text('This action is permanent. Your data will be scheduled for deletion.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            onPressed: () async {
+              final user = FirebaseAuth.instance.currentUser;
+              if (user != null) {
+                await _firestore.collection('clients').doc(user.uid).update({
+                  'deletionRequest': true,
+                  'deletionRequestedAt': FieldValue.serverTimestamp(),
+                });
+                await FirebaseAuth.instance.signOut();
+                if (mounted) {
+                  Navigator.of(context).pushAndRemoveUntil(
+                    MaterialPageRoute(builder: (context) => const OnboardingPage()), (r) => false
+                  );
+                }
+              }
+            },
+          ),
+        ],
+      ),
+    );
   }
 }

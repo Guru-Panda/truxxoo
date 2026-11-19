@@ -2,7 +2,7 @@ name: truxoo_client_new
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 1.0.0+5
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -17,6 +17,7 @@ dependencies:
   animated_text_kit: ^4.2.2
   carousel_slider: ^4.2.1
   flutter_launcher_icons: ^0.13.1
+
   
   # Network & API
   dio: ^5.3.3
@@ -56,8 +57,9 @@ dependencies:
   firebase_storage: ^12.0.0
   firebase_database: ^11.0.0
   lottie: ^3.3.1
+  cached_network_image: ^3.3.0
 
-  # ... dev dependencies ...
+  font_awesome_flutter: ^10.7.0
 
 dev_dependencies:
   flutter_test:
@@ -68,5 +70,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/
+    - .env
 # ... lottie dependencies ...
 lottie: ^2.7.0

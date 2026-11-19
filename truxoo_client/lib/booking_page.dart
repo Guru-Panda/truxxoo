@@ -6,25 +6,38 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:intl/intl.dart'; 
-
-// ✅ IMPORT WAITING PAGE
-import 'waiting_page.dart'; 
+import 'package:geocoding/geocoding.dart'; 
 
 class BookingPage extends StatefulWidget {
   final String pickupLocation;
   final String dropoffLocation;
   
-  // ✅ LOGIC: Fields required for the backend flow
+  // Location Coordinates
   final double pickupLat;
   final double pickupLng;
   final double dropoffLat;
   final double dropoffLng;
   
+  // Product Details
   final String goodsType;
   final String weight;
+  final int trucksCount; 
   final String notes;
+
+  // Client (Sender) Details
   final String clientName; 
   final String clientPhone;
+
+  // Receiver Details
+  final String receiverName;
+  final String receiverPhone;
+  final String receiverEmail;
+  final String deliveryPincode;
+  final String deliveryState; 
+
+  // User Requested Schedule 
+  final String pickupDate;
+  final String pickupTime;
 
   const BookingPage({
     super.key,
@@ -36,9 +49,17 @@ class BookingPage extends StatefulWidget {
     required this.dropoffLng,
     required this.goodsType,
     required this.weight,
+    required this.trucksCount, 
     required this.notes,
     required this.clientName,
     required this.clientPhone,
+    required this.receiverName,
+    required this.receiverPhone,
+    required this.receiverEmail,
+    required this.deliveryPincode,
+    required this.deliveryState, 
+    required this.pickupDate,
+    required this.pickupTime,
   });
 
   @override
@@ -50,17 +71,20 @@ class _BookingPageState extends State<BookingPage> {
   String? _selectedTruckType;
   late LatLng _pickupLatLng;
   late LatLng _deliveryLatLng;
-  bool _locationsInitialized = false;
   bool _isBooking = false; 
+  bool _isLoadingRates = true; 
 
-  // ✅ Logic: Advance Booking Date/Time
-  DateTime? _scheduledDate;
-  TimeOfDay? _scheduledTime;
+  // Dynamic Pricing Variables
+  String _pickupStateName = '';
+  String _deliveryStateName = '';
+  bool _isSameState = false;
+  Map<String, int> _calculatedRates = {};
 
   @override
   void initState() {
     super.initState();
     _initializeLocations();
+    _fetchStatesAndCalculateRates(); 
     BackButtonInterceptor.add(_backButtonInterceptor);
   }
 
@@ -83,31 +107,98 @@ class _BookingPageState extends State<BookingPage> {
     setState(() {
       _pickupLatLng = LatLng(widget.pickupLat, widget.pickupLng);
       _deliveryLatLng = LatLng(widget.dropoffLat, widget.dropoffLng);
-      _locationsInitialized = true;
+      _deliveryStateName = widget.deliveryState; // Fallback
     });
   }
 
-  // ✅ Logic: Date/Time Pickers for Advance
-  Future<void> _pickDate() async {
-    final DateTime? picked = await showDatePicker(
-      context: context,
-      initialDate: DateTime.now(),
-      firstDate: DateTime.now(),
-      lastDate: DateTime.now().add(const Duration(days: 30)),
-    );
-    if (picked != null && picked != _scheduledDate) {
-      setState(() => _scheduledDate = picked);
+  // --- REVERSE GEOCODING & DYNAMIC PRICING LOGIC ---
+
+  Future<void> _fetchStatesAndCalculateRates() async {
+    try {
+      // 1. Fetch Pickup State using Lat/Lng
+      List<Placemark> pickupPlacemarks = await placemarkFromCoordinates(widget.pickupLat, widget.pickupLng);
+      if (pickupPlacemarks.isNotEmpty) {
+        _pickupStateName = pickupPlacemarks.first.administrativeArea ?? '';
+      }
+
+      // 2. Fetch Delivery State using Lat/Lng
+      List<Placemark> dropoffPlacemarks = await placemarkFromCoordinates(widget.dropoffLat, widget.dropoffLng);
+      if (dropoffPlacemarks.isNotEmpty) {
+        _deliveryStateName = dropoffPlacemarks.first.administrativeArea ?? widget.deliveryState;
+      }
+    } catch (e) {
+      debugPrint("Geocoding failed, falling back to basic data: $e");
     }
+
+    _calculateDynamicRates();
   }
 
-  Future<void> _pickTime() async {
-    final TimeOfDay? picked = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay.now(),
-    );
-    if (picked != null && picked != _scheduledTime) {
-      setState(() => _scheduledTime = picked);
+  double _calculateDistanceKm(double lat1, double lon1, double lat2, double lon2) {
+    const p = 0.017453292519943295; 
+    final a = 0.5 - cos((lat2 - lat1) * p) / 2 + 
+              cos(lat1 * p) * cos(lat2 * p) * (1 - cos((lon2 - lon1) * p)) / 2;
+    double straightDistance = 12742 * asin(sqrt(a)); 
+    return straightDistance * 1.35; 
+  }
+
+  void _calculateDynamicRates() {
+    double dist = _calculateDistanceKm(widget.pickupLat, widget.pickupLng, widget.dropoffLat, widget.dropoffLng);
+    double w = double.tryParse(widget.weight) ?? 1.0;
+    
+    // Geocoding Fallback to prevent massive price spikes
+    bool isSameState = false;
+    if (_pickupStateName.isNotEmpty && _deliveryStateName.isNotEmpty) {
+      isSameState = _pickupStateName.trim().toLowerCase() == _deliveryStateName.trim().toLowerCase();
+    } else {
+      isSameState = dist < 50.0; // Assume intrastate if API failed but distance is short
     }
+
+    int scvRate = (24.5 * dist * w).round();
+    int lcvRate = ((dist <= 60 ? 24.5 : 22.5) * dist * w).round();
+
+    double mcv = 0;
+    if (isSameState) {
+      if (dist <= 100) mcv = 7.8 * dist * w;
+      else if (dist <= 300) mcv = 7.2 * dist * w;
+      else if (dist <= 600) mcv = 6.8 * dist * w;
+      else mcv = 6.4 * dist * w;
+      if (mcv < 6000) mcv = 6000;
+    } else {
+      if (dist <= 300) mcv = 18.9 * dist * w;
+      else if (dist <= 600) mcv = 16.0 * dist * w;
+      else if (dist <= 1200) mcv = 14.5 * dist * w;
+      else if (dist <= 1300) mcv = 13.6 * dist * w;
+      else mcv = 12.0 * dist * w;
+      if (mcv < 12500) mcv = 12500;
+    }
+
+    double hcv = 0;
+    if (isSameState) {
+      if (dist <= 100) hcv = 6.9 * dist * w;
+      else if (dist <= 300) hcv = 6.4 * dist * w;
+      else if (dist <= 600) hcv = 6.2 * dist * w;
+      else hcv = 5.8 * dist * w;
+      if (hcv < 9000) hcv = 9000;
+    } else {
+      if (dist <= 300) hcv = 16.0 * dist * w;
+      else if (dist <= 600) hcv = 13.5 * dist * w;
+      else if (dist <= 1200) hcv = 13.0 * dist * w;
+      else hcv = 11.0 * dist * w;
+      if (hcv < 20000) hcv = 20000;
+    }
+
+    setState(() {
+      _isSameState = isSameState;
+      _isLoadingRates = false; 
+      _calculatedRates = {
+        'Small Commercial Vehicle': scvRate,
+        'Light Commercial Vehicle': lcvRate,
+        'Medium Commercial Vehicle': mcv.round(),
+        'Heavy Commercial Vehicle': hcv.round(),
+        'Container Truck': (hcv * 1.1).round(), 
+        'Dump Truck': (hcv * 1.05).round(),
+      };
+    });
   }
 
   String _generateTrackingId() {
@@ -115,23 +206,8 @@ class _BookingPageState extends State<BookingPage> {
     return 'TRX${rng.nextInt(900000) + 100000}';
   }
 
-  // ✅ Logic: Save to Firestore
   Future<void> _saveBookingToFirestore(String vehicleType) async {
-    // 1. Validation for Advance
-    if (_selectedBookingType == 'advance') {
-      if (_scheduledDate == null || _scheduledTime == null) {
-        // CLOSE MODAL FIRST so user can see the error
-        Navigator.pop(context); 
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please select Date and Time for Advance Booking'), 
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating, // Floats above other UI
-          ),
-        );
-        return;
-      }
-    }
+    if (_isBooking) return; 
 
     setState(() => _isBooking = true);
 
@@ -148,71 +224,84 @@ class _BookingPageState extends State<BookingPage> {
 
       final String trackingId = _generateTrackingId();
       
-      // Determine Trip Date
-      DateTime tripDateTime;
-      if (_selectedBookingType == 'advance') {
-        tripDateTime = DateTime(
-          _scheduledDate!.year, _scheduledDate!.month, _scheduledDate!.day,
-          _scheduledTime!.hour, _scheduledTime!.minute,
-        );
-      } else {
-        tripDateTime = DateTime.now();
+      // Accurately parse the user's requested date and time
+      DateTime scheduledDateTime;
+      try {
+        scheduledDateTime = DateFormat('dd-MM-yyyy hh:mm a')
+            .parse('${widget.pickupDate} ${widget.pickupTime}');
+      } catch (e) {
+        scheduledDateTime = DateTime.now(); 
       }
       
-      final String formattedDate = DateFormat('dd/MM/yy').format(tripDateTime);
-      final String formattedTime = DateFormat('hh:mm a').format(tripDateTime);
+      final String formattedDate = DateFormat('dd/MM/yy').format(scheduledDateTime);
+      final String formattedTime = DateFormat('hh:mm a').format(scheduledDateTime);
+
+      int estimatedFare = _calculatedRates[_selectedTruckType ?? 'Heavy Commercial Vehicle'] ?? 0;
 
       final Map<String, dynamic> bookingData = {
         'clientId': user.uid,
         'clientName': widget.clientName,
         'clientPhone': widget.clientPhone,
         'clientPhoto': user.photoURL ?? '',
+        
+        'receiverName': widget.receiverName,
+        'receiverPhone': widget.receiverPhone,
+        'receiverEmail': widget.receiverEmail,
+        'deliveryPincode': widget.deliveryPincode,
+        'deliveryState': _deliveryStateName,
+        'pickupState': _pickupStateName, 
+        'requestedDate': widget.pickupDate, 
+        'requestedTime': widget.pickupTime, 
+
         'status': 'pending',
         'bookingType': _selectedBookingType,
         'trackingId': trackingId,
+        
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
-        'date': formattedDate,
-        'time': formattedTime,
-        'scheduledTimestamp': Timestamp.fromDate(tripDateTime),
-        'acceptedAt': null, 'cancelledAt': null, 'cancelledBy': null, 'deniedBy': [],
-        'lockVersion': 0,
-        'driverName': null, 'driverPhone': null, 'driverPhoto': null, 'truckNumber': null,
+        
+        'date': formattedDate, 
+        'time': formattedTime, 
+        'scheduledTimestamp': Timestamp.fromDate(scheduledDateTime), 
+        
         'pickupAddress': widget.pickupLocation,
         'pickupLocation': widget.pickupLocation.split(',')[0],
         'pickupLat': widget.pickupLat, 'pickupLng': widget.pickupLng,
         'dropAddress': widget.dropoffLocation,
         'dropLocation': widget.dropoffLocation.split(',')[0],
         'dropLat': widget.dropoffLat, 'dropLng': widget.dropoffLng,
+        
         'goodsType': widget.goodsType,
         'weight': double.tryParse(widget.weight) ?? 0.0,
+        'trucksCount': widget.trucksCount, 
         'notes': widget.notes,
-        'isRoundTrip': false,
+        
         'vehicleType': vehicleType,
         'truckType': _selectedTruckType ?? 'Standard',
-        'estimatedFare': 18500,
+        'estimatedFare': estimatedFare, 
+        
+        'acceptedAt': null, 'cancelledAt': null, 'cancelledBy': null, 'deniedBy': [],
+        'lockVersion': 0,
+        'driverName': null, 'driverPhone': null, 'driverPhoto': null, 'truckNumber': null,
+        'isRoundTrip': false,
       };
 
-      DocumentReference docRef = await db.collection('booking_requests').add(bookingData);
+      await db.collection('booking_requests').add(bookingData);
 
       if (mounted) {
-        // Close the Modal
         Navigator.pop(context); 
-        
-        // Navigate to Waiting Page
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => DriverSearchingPage(
-              bookingId: docRef.id,     
-              trackingId: trackingId,   
-            ),
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Booking Confirmed! ID: $trackingId'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 4),
           ),
         );
+        Navigator.of(context).popUntil((route) => route.isFirst);
       }
     } catch (e) {
       if (mounted) {
-        Navigator.pop(context); // Close modal on error too
+        Navigator.pop(context); 
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
       }
     } finally {
@@ -224,52 +313,56 @@ class _BookingPageState extends State<BookingPage> {
     setState(() => _selectedBookingType = type);
   }
 
-  // ✅ FIXED: simplified logic to trigger modal directly
   void _selectTruckType(String truckType) {
     setState(() => _selectedTruckType = truckType);
 
     String title = "";
     String subtitle = "";
     String vehicleId = "";
-    String imagePath = "";
+    List<String> imagePaths = []; 
 
     switch (truckType) {
+      case 'Small Commercial Vehicle':
+        title = 'Small Commercial';
+        subtitle = 'Ideal for local narrow streets';
+        vehicleId = 'SCV';
+        imagePaths = ['assets/scv1.png', 'assets/scv2.png', 'assets/scv3.png'];
+        break;
       case 'Light Commercial Vehicle':
         title = 'Light Commercial';
         subtitle = 'Perfect for small loads';
-        imagePath = 'assets/trucks/lcv_truck.png';
         vehicleId = 'LCV';
+        imagePaths = ['assets/lcv1.png', 'assets/lcv2.png', 'assets/lcv3.png'];
         break;
       case 'Medium Commercial Vehicle':
         title = 'Medium Commercial';
         subtitle = 'Ideal for medium cargo';
-        imagePath = 'assets/trucks/mcv_truck.png';
         vehicleId = 'Medium Covered Truck';
+        imagePaths = ['assets/mcv1.png', 'assets/mcv2.png', 'assets/mcv3.png'];
         break;
       case 'Heavy Commercial Vehicle':
         title = 'Heavy Commercial';
         subtitle = 'Heavy duty transportation';
-        imagePath = 'assets/trucks/hcv_truck.png';
         vehicleId = 'Heavy Open Truck';
+        imagePaths = ['assets/hcv1.png', 'assets/hcv2.png', 'assets/hcv3.png'];
         break;
       case 'Container Truck':
         title = 'Container Trucks';
         subtitle = 'Standard shipping';
-        imagePath = 'assets/trucks/container_truck.png';
         vehicleId = 'Container 32ft';
+        imagePaths = ['assets/container1.png', 'assets/container2.png', 'assets/container3.png'];
         break;
       case 'Dump Truck':
         title = 'Dump Trucks';
         subtitle = 'Construction materials';
-        imagePath = 'assets/trucks/dump_truck.png';
         vehicleId = 'Hyva Dump';
+        imagePaths = ['assets/dump1.png', 'assets/dump2.png', 'assets/dump3.png'];
         break;
     }
 
-    _showDirectModal(title, subtitle, [imagePath], vehicleId);
+    _showDirectModal(title, subtitle, imagePaths, vehicleId);
   }
 
-  // ✅ FIXED: Direct Modal Opener
   void _showDirectModal(String title, String subtitle, List<String> images, String vehicleId) {
     showModalBottomSheet(
       context: context,
@@ -282,12 +375,12 @@ class _BookingPageState extends State<BookingPage> {
           images: images,
           accentColor: Colors.black,
           confirmMessage: "Confirm Booking", 
-          onConfirm: () => _saveBookingToFirestore(vehicleId), // Links directly to logic
+          onConfirm: () async => await _saveBookingToFirestore(vehicleId), 
         );
       },
     );
   }
-
+  
   // --- UI WIDGETS ---
 
   Widget _buildToggleButton(String type, String label) {
@@ -320,78 +413,39 @@ class _BookingPageState extends State<BookingPage> {
     );
   }
 
-  Widget _buildAdvanceScheduler() {
+  // ✅ Restored the "Advance" placeholder message
+  Widget _buildAdvanceNotice() {
     return Container(
-      margin: const EdgeInsets.only(bottom: 20),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade300),
-      ),
+      margin: const EdgeInsets.only(top: 40),
+      padding: const EdgeInsets.symmetric(horizontal: 30),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text("Schedule your trip", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          const SizedBox(height: 15),
-          Row(
-            children: [
-              Expanded(
-                child: InkWell(
-                  onTap: _pickDate,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      border: Border.all(color: Colors.grey.shade400),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.calendar_today, size: 18, color: Colors.black54),
-                        const SizedBox(width: 8),
-                        Text(
-                          _scheduledDate == null ? "Select Date" : DateFormat('dd MMM').format(_scheduledDate!),
-                          style: const TextStyle(fontWeight: FontWeight.w500),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: InkWell(
-                  onTap: _pickTime,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      border: Border.all(color: Colors.grey.shade400),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.access_time, size: 18, color: Colors.black54),
-                        const SizedBox(width: 8),
-                        Text(
-                          _scheduledTime == null ? "Select Time" : _scheduledTime!.format(context),
-                          style: const TextStyle(fontWeight: FontWeight.w500),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ],
+          Icon(Icons.access_time_filled, size: 60, color: Colors.grey.shade400),
+          const SizedBox(height: 20),
+          Text(
+            "No returning trucks available in your area right now check back later.",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 18, 
+              fontWeight: FontWeight.w600,
+              color: Colors.grey.shade600
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildTruckItem({required String truckType, required String description, required String price, required String imagePath}) {
+  Widget _buildTruckItem({required String truckType, required String description, required String imagePath}) {
+    if (truckType == 'Small Commercial Vehicle' && !_isSameState) {
+      return const SizedBox.shrink();
+    }
+
+    int rate = _calculatedRates[truckType] ?? 0;
+    String formattedPrice = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0).format(rate);
+
     final bool isSelected = _selectedTruckType == truckType;
+    
     return GestureDetector(
       onTap: () => _selectTruckType(truckType),
       child: Container(
@@ -425,7 +479,13 @@ class _BookingPageState extends State<BookingPage> {
                     Text(description, style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
                   ]),
                 ),
-                Text(price, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black)),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    const Text('Starting from', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                    Text(formattedPrice, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black)),
+                  ],
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -453,7 +513,7 @@ class _BookingPageState extends State<BookingPage> {
       body: Column(
         children: [
           SizedBox(
-            height: screenHeight * 0.40, // Map takes 40%
+            height: screenHeight * 0.40, 
             width: double.infinity,
             child: MapWithPolyline(
               pickupLatLng: _pickupLatLng,
@@ -470,7 +530,9 @@ class _BookingPageState extends State<BookingPage> {
                   child: Row(children: [_buildToggleButton('instant', 'Instant'), _buildToggleButton('advance', 'Advance')]),
                 ),
                 Expanded(
-                  child: SingleChildScrollView(
+                  child: _isLoadingRates 
+                  ? const Center(child: CircularProgressIndicator(color: Colors.black)) 
+                  : SingleChildScrollView(
                     child: Container(
                       padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
                       child: Column(
@@ -478,14 +540,17 @@ class _BookingPageState extends State<BookingPage> {
                           if (_isBooking) const LinearProgressIndicator(color: Colors.black),
                           if (_isBooking) const SizedBox(height: 10),
                           
-                          // ✅ Date/Time picker shows here if Advance is selected
-                          if (_selectedBookingType == 'advance') _buildAdvanceScheduler(),
-
-                          _buildTruckItem(truckType: 'Light Commercial Vehicle', description: 'Perfect for small loads, city deliveries', price: '₹2,500', imagePath: 'assets/trucks/lcv_truck.png'),
-                          _buildTruckItem(truckType: 'Medium Commercial Vehicle', description: 'Ideal for medium-sized cargo', price: '₹4,200', imagePath: 'assets/trucks/mcv_truck.png'),
-                          _buildTruckItem(truckType: 'Heavy Commercial Vehicle', description: 'Heavy duty transportation', price: '₹6,800', imagePath: 'assets/trucks/hcv_truck.png'),
-                          _buildTruckItem(truckType: 'Container Truck', description: 'Standard shipping containers', price: '₹8,500', imagePath: 'assets/trucks/container_truck.png'),
-                          _buildTruckItem(truckType: 'Dump Truck', description: 'Construction & mining materials', price: '₹5,200', imagePath: 'assets/trucks/dump_truck.png'),
+                          // ✅ Toggles correctly based on user intent
+                          if (_selectedBookingType == 'advance') 
+                            _buildAdvanceNotice()
+                          else ...[
+                            _buildTruckItem(truckType: 'Small Commercial Vehicle', description: '0.5 - 1 Ton, Local narrow streets', imagePath: 'assets/trucks/scv_truck.png'),
+                            _buildTruckItem(truckType: 'Light Commercial Vehicle', description: '1 - 5 Ton, Commercial goods', imagePath: 'assets/trucks/lcv_truck.png'),
+                            _buildTruckItem(truckType: 'Medium Commercial Vehicle', description: '6 - 14 Ton, Mid-sized industrial shipments', imagePath: 'assets/trucks/mcv_truck.png'),
+                            _buildTruckItem(truckType: 'Heavy Commercial Vehicle', description: '14 - 24+ Ton, Heavy duty bulk cargo', imagePath: 'assets/trucks/hcv_truck.png'),
+                            _buildTruckItem(truckType: 'Container Truck', description: 'Standard shipping containers', imagePath: 'assets/trucks/container_truck.png'),
+                            _buildTruckItem(truckType: 'Dump Truck', description: 'Construction & mining materials', imagePath: 'assets/trucks/dump_truck.png'),
+                          ]
                         ],
                       ),
                     ),
@@ -500,7 +565,7 @@ class _BookingPageState extends State<BookingPage> {
   }
 }
 
-// ==================== MAP WIDGET (Unchanged) ====================
+// ==================== MAP WIDGET ====================
 class MapWithPolyline extends StatefulWidget {
   final LatLng pickupLatLng;
   final LatLng deliveryLatLng;
@@ -547,14 +612,14 @@ class _MapWithPolylineState extends State<MapWithPolyline> {
   }
 }
 
-// ==================== MODAL SHEET (Cleaned Up) ====================
+// ==================== MODAL SHEET ====================
 class BaseModalSheet extends StatefulWidget {
   final String title;
   final String subtitle;
   final List<String> images;
   final String confirmMessage;
   final Color accentColor;
-  final VoidCallback onConfirm;
+  final Future<void> Function() onConfirm; 
 
   const BaseModalSheet({
     super.key,
@@ -573,6 +638,7 @@ class BaseModalSheet extends StatefulWidget {
 class _BaseModalSheetState extends State<BaseModalSheet> {
   late PageController _pageController;
   int _currentIndex = 0;
+  bool _isConfirming = false; 
 
   @override
   void initState() {
@@ -612,9 +678,23 @@ class _BaseModalSheetState extends State<BaseModalSheet> {
           Container(
             padding: const EdgeInsets.all(20), width: double.infinity,
             child: ElevatedButton(
-              onPressed: widget.onConfirm, 
-              style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor, padding: const EdgeInsets.symmetric(vertical: 16)), 
-              child: Text(widget.confirmMessage, style: const TextStyle(fontSize: 18, color: Colors.white))
+              onPressed: _isConfirming ? null : () async {
+                setState(() => _isConfirming = true);
+                await widget.onConfirm();
+                if (mounted) setState(() => _isConfirming = false);
+              }, 
+              style: ElevatedButton.styleFrom(
+                backgroundColor: widget.accentColor, 
+                disabledBackgroundColor: Colors.grey.shade400,
+                padding: const EdgeInsets.symmetric(vertical: 16)
+              ), 
+              child: _isConfirming 
+                ? const SizedBox(
+                    height: 20, 
+                    width: 20, 
+                    child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
+                  )
+                : Text(widget.confirmMessage, style: const TextStyle(fontSize: 18, color: Colors.white))
             ),
           ),
         ],

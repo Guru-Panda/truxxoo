@@ -26,9 +26,66 @@
     },
     {
       "client_info": {
+        "mobilesdk_app_id": "1:326678539539:android:0173f68738fc20abb1bee6",
+        "android_client_info": {
+          "package_name": "com.example.unload_owner"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCw41kB4NmmtF0w1etFNf1a6zlq9d1Ijrc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:326678539539:android:adf13dbb730193deb1bee6",
         "android_client_info": {
           "package_name": "com.truxoo.truxoo"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCw41kB4NmmtF0w1etFNf1a6zlq9d1Ijrc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:326678539539:android:1d78ab1975a416e1b1bee6",
+        "android_client_info": {
+          "package_name": "com.unloadweb.captain"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCw41kB4NmmtF0w1etFNf1a6zlq9d1Ijrc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:326678539539:android:1c84bf285ee0d1acb1bee6",
+        "android_client_info": {
+          "package_name": "com.unloadweb.unload"
         }
       },
       "oauth_client": [],

@@ -1,8 +1,13 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:intl/intl.dart';
 import 'package:back_button_interceptor/back_button_interceptor.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart'; 
+
 import 'client_side_home.dart';
-import 'dataclient_service.dart';
 
 class TrackTruck extends StatefulWidget {
   final String? displayName;
@@ -23,10 +28,21 @@ class TrackTruck extends StatefulWidget {
 class _TrackTruckState extends State<TrackTruck> {
   final TextEditingController _trackingController = TextEditingController();
   bool _isLoading = false;
+  bool _isTracking = false;
   
-  DeliveryInfo? _currentDelivery;
+  Map<String, dynamic>? _trackingData;
   String? _errorMessage;
-  StreamSubscription? _bookingSubscription;
+  StreamSubscription<DocumentSnapshot>? _locationSubscription;
+
+  // Variables to cache geocoding to prevent API rate-limit spam
+  GeoPoint? _lastGeocodedLocation;
+  String _lastGeocodedAddress = 'En Route';
+
+  // Use correct Firestore instance
+  FirebaseFirestore get _firestore => FirebaseFirestore.instanceFor(
+    app: Firebase.app(),
+    databaseId: 'truxoodriver',
+  );
 
   @override
   void initState() {
@@ -38,13 +54,13 @@ class _TrackTruckState extends State<TrackTruck> {
   void dispose() {
     BackButtonInterceptor.remove(_backButtonInterceptor);
     _trackingController.dispose();
-    _bookingSubscription?.cancel();
+    _locationSubscription?.cancel();
     super.dispose();
   }
 
   bool _backButtonInterceptor(bool stopDefaultButtonEvent, RouteInfo info) {
     _navigateToHome();
-    return true;
+    return true; // Prevents default back behavior
   }
 
   void _navigateToHome() {
@@ -53,80 +69,207 @@ class _TrackTruckState extends State<TrackTruck> {
       MaterialPageRoute(
         builder: (context) => ClientSideHome(
           displayName: widget.displayName ?? 'Guest User',
-          displayProfilePicture: widget.displayProfilePicture ?? 'assets/client_image.webp',
+          displayProfilePicture: widget.displayProfilePicture ?? 'assets/cclient_imag_high.jpg',
           isUsingLocalImage: widget.isUsingLocalImage,
         ),
       ),
     );
   }
 
-  Future<void> _startTracking(String trackingId) async {
-    if (trackingId.trim().isEmpty) {
+  Future<void> _startTracking(String trackingIdInput) async {
+    FocusScope.of(context).unfocus();
+
+    final searchId = trackingIdInput.trim().toUpperCase();  
+    if (searchId.isEmpty) {
       _showSnackBar('Please enter a tracking number', Colors.orange);
       return;
     }
 
     setState(() {
       _isLoading = true;
+      _isTracking = false;
       _errorMessage = null;
-      _currentDelivery = null;
+      _trackingData = null;
+      _locationSubscription?.cancel();
+      
+      // Reset geocoding cache for new search
+      _lastGeocodedLocation = null;
+      _lastGeocodedAddress = 'En Route';
     });
 
-    // Use the service to search
-    final result = await ClientDataService.searchTracking(trackingId);
+    try {
+      DocumentSnapshot? foundDoc;
 
-    if (result.success && result.deliveryInfo != null) {
-      setState(() {
-        _currentDelivery = result.deliveryInfo;
-        _isLoading = false;
-      });
+      // Step 1: 2-Step Search (Doc ID first, then trackingId field)
+      try {
+        if (!searchId.contains('/')) {
+          final doc = await _firestore.collection('booking_requests')
+              .doc(searchId)
+              .get()
+              .timeout(const Duration(seconds: 15));
+          if (doc.exists) foundDoc = doc;
+        }
+      } catch (_) {}
 
-      // Start real-time updates
-      _startRealTimeUpdates(result.deliveryInfo!.documentId);
+      if (foundDoc == null) {
+        final query = await _firestore.collection('booking_requests')
+            .where('trackingId', isEqualTo: searchId) // Adjusted to match your client schema
+            .limit(1)
+            .get()
+            .timeout(const Duration(seconds: 15));
+        if (query.docs.isNotEmpty) foundDoc = query.docs.first;
+      }
+
+      if (foundDoc == null || !foundDoc.exists) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = "Tracking ID Not Found";
+        });
+        _showSnackBar('Invalid tracking number. No booking found.', Colors.red);
+        return;
+      }
+
+      final bookingId = foundDoc.id;
+      final bookingData = foundDoc.data() as Map<String, dynamic>;
       
-    } else {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = result.message;
-      });
-      _showSnackBar(result.message ?? 'Not found', Colors.red);
+      // Step 2: Start streaming the 'locations' collection
+      _startLocationStream(bookingId, bookingData, searchId);
+
+    } catch (e) {
+      setState(() => _isLoading = false);
+      if (mounted) {
+        String msg = e.toString();
+        if (e is TimeoutException) msg = "Connection timeout.";
+        _showSnackBar('Error searching: $msg', Colors.red);
+      }
     }
   }
 
-  void _startRealTimeUpdates(String documentId) {
-    _bookingSubscription?.cancel();
-    
-    _bookingSubscription = ClientDataService.getBookingStream(documentId).listen(
-      (deliveryInfo) {
-        if (mounted && deliveryInfo != null) {
+  void _startLocationStream(String bookingId, Map<String, dynamic> initialData, String searchId) {
+    _trackingData = {
+      'trackingId': initialData['trackingId'] ?? searchId,
+      'status': initialData['status'] ?? 'Unknown',
+      'driverName': initialData['driverName'] ?? 'Unknown Driver',
+      'truckNumber': initialData['truckNumber'] ?? 'Unknown Truck',
+      'pickupLocation': initialData['pickupLocation'] ?? '',
+      'dropLocation': initialData['dropLocation'] ?? '',
+      'currentLocation': 'Waiting for update...',
+      'lastUpdated': null,
+    };
+
+    _locationSubscription = _firestore
+        .collection('locations')
+        .doc(bookingId)
+        .snapshots()
+        .listen((snapshot) async { 
+      
+      if (mounted && snapshot.exists) {
+        final locData = snapshot.data() as Map<String, dynamic>;       
+        
+        // Get Basic Data
+        String statusMsg = locData['status']?.toString() ?? 'En Route';
+        DateTime? lastUpdated;
+        if (locData['lastUpdated'] != null) {
+          lastUpdated = (locData['lastUpdated'] as Timestamp).toDate();
+        }
+
+        String locationText = 'En Route';
+        
+        if (statusMsg == 'atPickup') {
+          locationText = 'At Pickup Location';
+        } else if (statusMsg == 'completed') {
+          locationText = 'Delivered';
+        } else if (locData['currentLocation'] != null) {
+          
+          final rawLocation = locData['currentLocation'];
+          
+          if (rawLocation is GeoPoint) {
+            GeoPoint currentGeo = rawLocation;
+            bool shouldGeocode = false;
+
+            // 1km Distance Check to save API requests
+            if (_lastGeocodedLocation == null) {
+              shouldGeocode = true;
+            } else {
+              double distance = Geolocator.distanceBetween(
+                _lastGeocodedLocation!.latitude,
+                _lastGeocodedLocation!.longitude,
+                currentGeo.latitude,
+                currentGeo.longitude,
+              );
+              
+              if (distance > 1000) { 
+                shouldGeocode = true;
+              }
+            }
+
+            if (shouldGeocode) {
+              try {
+                List<Placemark> placemarks = await placemarkFromCoordinates(
+                  currentGeo.latitude, 
+                  currentGeo.longitude
+                );
+
+                if (placemarks.isNotEmpty) {
+                  Placemark place = placemarks[0];
+                  String street = place.thoroughfare ?? '';
+                  String locality = place.subLocality ?? place.locality ?? '';
+                  
+                  if (street.isNotEmpty && locality.isNotEmpty) {
+                    _lastGeocodedAddress = "Near $street, $locality";
+                  } else if (locality.isNotEmpty) {
+                    _lastGeocodedAddress = "Near $locality";
+                  } else {
+                    _lastGeocodedAddress = "Near ${place.name}";
+                  }
+                  
+                  _lastGeocodedLocation = currentGeo;
+                } else {
+                  _lastGeocodedAddress = "En Route (${currentGeo.latitude.toStringAsFixed(3)}, ${currentGeo.longitude.toStringAsFixed(3)})";
+                }
+              } catch (e) {
+                if (_lastGeocodedLocation == null) {
+                  _lastGeocodedAddress = "En Route (Updating...)";
+                }
+              }
+            }
+            
+            locationText = _lastGeocodedAddress;
+            
+          } else {
+            locationText = "En Route (Location updating...)";
+          }
+        }
+
+        if (mounted) {
           setState(() {
-            _currentDelivery = deliveryInfo;
+            _trackingData!['status'] = statusMsg;
+            _trackingData!['lastUpdated'] = lastUpdated;
+            _trackingData!['currentLocation'] = locationText; 
           });
         }
-      },
-      onError: (e) {
-        print("Real-time update error: $e");
-      },
-    );
-  }
+      } else if (mounted && !snapshot.exists && _isTracking) {
+        // Handle case where location document is deleted
+        _locationSubscription?.cancel();
+        setState(() {
+          _trackingData = null;
+          _errorMessage = "Tracking session has expired or been removed.";
+        });
+      }
+      
+      if (mounted) {
+        setState(() {
+          _isTracking = true;
+          _isLoading = false;
+        });
+      }
 
-  Future<void> _refreshLocation() async {
-    if (_currentDelivery == null) return;
-
-    setState(() => _isLoading = true);
-
-    final updated = await ClientDataService.refreshBookingData(_currentDelivery!.documentId);
-
-    if (updated != null) {
-      setState(() {
-        _currentDelivery = updated;
-        _isLoading = false;
-      });
-      _showSnackBar('Location updated', Colors.green);
-    } else {
-      setState(() => _isLoading = false);
-      _showSnackBar('Error refreshing', Colors.red);
-    }
+    }, onError: (e) {
+      debugPrint("Error in location stream: $e");
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    });
   }
 
   void _showSnackBar(String message, Color color) {
@@ -146,19 +289,15 @@ class _TrackTruckState extends State<TrackTruck> {
     final isLargeScreen = MediaQuery.of(context).size.width > 600;
 
     return Scaffold(
+      backgroundColor: Colors.white,
       appBar: AppBar(
-        title: const Text('Track Truck'),
+        title: const Text('Track Truck', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.white,
+        elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
+          icon: const Icon(Icons.arrow_back, color: Colors.black),
           onPressed: _navigateToHome,
         ),
-        actions: [
-          if (_currentDelivery != null)
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              onPressed: _isLoading ? null : _refreshLocation,
-            ),
-        ],
       ),
       body: SingleChildScrollView(
         padding: EdgeInsets.all(isLargeScreen ? 24.0 : 16.0),
@@ -172,8 +311,8 @@ class _TrackTruckState extends State<TrackTruck> {
               ),
             if (_errorMessage != null && !_isLoading)
               _buildErrorCard(isLargeScreen),
-            if (_currentDelivery != null && !_isLoading)
-              _buildDeliveryCard(_currentDelivery!, isLargeScreen),
+            if (_isTracking && _trackingData != null && !_isLoading)
+              _buildDeliveryCard(_trackingData!, isLargeScreen),
           ],
         ),
       ),
@@ -234,14 +373,16 @@ class _TrackTruckState extends State<TrackTruck> {
               'Tracking ID Not Found',
               style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red[700]),
             ),
-            Text(_errorMessage ?? '', style: TextStyle(color: Colors.red[600])),
+            Text(_errorMessage ?? '', style: TextStyle(color: Colors.red[600]), textAlign: TextAlign.center),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildDeliveryCard(DeliveryInfo delivery, bool isLargeScreen) {
+  Widget _buildDeliveryCard(Map<String, dynamic> data, bool isLargeScreen) {
+    final status = data['status'].toString();
+
     return Card(
       margin: const EdgeInsets.only(top: 16),
       elevation: 4,
@@ -254,20 +395,24 @@ class _TrackTruckState extends State<TrackTruck> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('ID: ${delivery.trackingId}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text('ID: ${data['trackingId']}', style: const TextStyle(fontWeight: FontWeight.bold)),
                 Chip(
-                  label: Text(delivery.status.toUpperCase()),
-                  backgroundColor: _getStatusColor(delivery.status).withOpacity(0.2),
+                  label: Text(status.toUpperCase()),
+                  backgroundColor: _getStatusColor(status).withOpacity(0.2),
+                  labelStyle: TextStyle(
+                    color: _getStatusColor(status),
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ],
             ),
             const Divider(),
-            if (delivery.driverName.isNotEmpty)
-              _buildRow('Driver', delivery.driverName),
-            if (delivery.truckId.isNotEmpty)
-              _buildRow('Truck', delivery.truckId),
-            _buildRow('From', delivery.pickupLocation),
-            _buildRow('To', delivery.dropLocation),
+            if (data['driverName'].toString().isNotEmpty)
+              _buildRow('Driver', data['driverName']),
+            if (data['truckNumber'].toString().isNotEmpty)
+              _buildRow('Truck', data['truckNumber']),
+            _buildRow('From', data['pickupLocation']),
+            _buildRow('To', data['dropLocation']),
             const Divider(),
             Container(
               padding: const EdgeInsets.all(12),
@@ -279,15 +424,16 @@ class _TrackTruckState extends State<TrackTruck> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text('📍 Current Location', style: TextStyle(fontWeight: FontWeight.bold)),
-                  Text(delivery.currentLocation),
+                  Text(data['currentLocation'] ?? 'Updating...'),
                 ],
               ),
             ),
             const SizedBox(height: 8),
-            Text(
-              'Last updated: ${_formatTime(delivery.lastUpdated)}',
-              style: TextStyle(color: Colors.grey[600], fontSize: 12),
-            ),
+            if (data['lastUpdated'] != null)
+              Text(
+                'Last updated: ${_formatTime(data['lastUpdated'] as DateTime)}',
+                style: TextStyle(color: Colors.grey[600], fontSize: 12),
+              ),
           ],
         ),
       ),
@@ -307,20 +453,32 @@ class _TrackTruckState extends State<TrackTruck> {
     );
   }
 
-  String _formatTime(DateTime dt) {
-    final diff = DateTime.now().difference(dt);
-    if (diff.inMinutes < 1) return 'Just now';
-    if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
-    if (diff.inHours < 24) return '${diff.inHours} hr ago';
-    return '${dt.day}/${dt.month}/${dt.year}';
+  String _formatTime(DateTime dateTime) {
+    final now = DateTime.now();
+    final difference = now.difference(dateTime);
+    
+    if (difference.inMinutes < 1) {
+      return 'Just now';
+    } else if (difference.inMinutes < 60) {
+      return '${difference.inMinutes} min ago';
+    } else if (difference.inHours < 24) {
+      return '${difference.inHours} hr ago';
+    } else {
+      return DateFormat('dd MMM, hh:mm a').format(dateTime);
+    }
   }
 
   Color _getStatusColor(String status) {
     switch (status.toLowerCase()) {
       case 'pending': return Colors.orange;
-      case 'accepted': return Colors.blue;
-      case 'in transit': return Colors.indigo;
-      case 'delivered': return Colors.green;
+      case 'accepted': 
+      case 'assigned':
+      case 'inprogress':
+      case 'enroute':
+        return Colors.blue;
+      case 'completed': 
+      case 'delivered':
+        return Colors.green;
       case 'cancelled': return Colors.red;
       default: return Colors.grey;
     }

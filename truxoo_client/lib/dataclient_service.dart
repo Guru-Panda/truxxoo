@@ -13,6 +13,9 @@ class ClientRegistrationData {
   final String companyName;
   final String companyRegNumber;
   final File profilePhoto;
+  // New KYC Fields
+  final File? gstImage; // MODIFIED: Made nullable
+  final File panImage;
 
   ClientRegistrationData({
     required this.name,
@@ -21,6 +24,8 @@ class ClientRegistrationData {
     required this.companyName,
     required this.companyRegNumber,
     required this.profilePhoto,
+    this.gstImage, // MODIFIED: Removed 'required'
+    required this.panImage,
   });
 }
 
@@ -53,12 +58,13 @@ class PhoneCheckResult {
     this.documentId,
   });
 
-  String get displayName => userData?['full_name'] ?? userData?['name'] ?? 'User';
-  String get profilePhotoUrl => userData?['profile_photo_url'] ?? '';
+  // Getters adapted to handle both old schema (snake_case) and new schema (camelCase)
+  String get displayName => userData?['fullName'] ?? userData?['full_name'] ?? userData?['name'] ?? 'User';
+  String get profilePhotoUrl => userData?['photoUrl'] ?? userData?['profile_photo_url'] ?? '';
   String get email => userData?['email'] ?? '';
-  String get companyName => userData?['company_name'] ?? '';
-  String get companyRegNumber => userData?['company_reg_number'] ?? '';
-  String get phoneNumber => userData?['phone_number'] ?? userData?['phoneNumber'] ?? '';
+  String get companyName => userData?['company'] ?? userData?['company_name'] ?? '';
+  String get companyRegNumber => userData?['registrationNumber'] ?? userData?['company_reg_number'] ?? '';
+  String get phoneNumber => userData?['phoneNumber'] ?? userData?['phone_number'] ?? '';
 }
 
 class TrackingResult {
@@ -132,7 +138,6 @@ class DeliveryInfo {
     double lat = 0.0;
     double lng = 0.0;
 
-    // Handle different coordinate structures
     if (data['current_location'] != null && data['current_location'] is Map) {
       final locData = data['current_location'] as Map;
       lat = (locData['latitude'] ?? 0.0).toDouble();
@@ -202,6 +207,7 @@ class ClientDataService {
       final cleanPhone = phoneNumber.replaceAll(RegExp(r'[^\d]'), '');
       final formattedPhone = '+91$cleanPhone';
       final searchNums = [cleanPhone, formattedPhone];
+      // Search fields for both old snake_case and new camelCase schemas
       final fieldNames = ['phoneNumber', 'phone_number', 'phone', 'mobile'];
 
       print("🔍 Service: Searching DB '$_dbName' for: $searchNums");
@@ -243,7 +249,7 @@ class ClientDataService {
     }
   }
 
-  // ==================== REGISTRATION ====================
+  // ==================== REGISTRATION (UPDATED FOR KYC) ====================
   static Future<RegistrationResult> registerClient({required ClientRegistrationData data}) async {
     try {
       User? currentUser = _auth.currentUser;
@@ -253,44 +259,81 @@ class ClientDataService {
 
       String uid = currentUser.uid;
 
+      // Double check phone number
       final phoneCheck = await checkPhoneExists(data.phoneNumber);
       if (phoneCheck.exists && phoneCheck.documentId != uid) {
         return RegistrationResult(success: false, message: phoneCheck.message ?? 'Number registered to another account.');
       }
 
-      String? downloadUrl;
+      // Clean Phone Number
+      final cleanPhone = data.phoneNumber.replaceAll(RegExp(r'[^\d]'), '');
+      final standardPhone = '+91${cleanPhone.length == 10 ? cleanPhone : cleanPhone.substring(cleanPhone.length - 10)}';
+
+      String? photoUrl;
+      String? gstUrl;
+      String? panUrl;
+
+      // 1. Upload Profile Photo -> clients/{uid}/logo
       try {
-        final storageRef = _storage.ref().child('client_photos/$uid.jpg');
-        await storageRef.putFile(data.profilePhoto, SettableMetadata(contentType: 'image/jpeg'));
-        downloadUrl = await storageRef.getDownloadURL();
+        final photoRef = _storage.ref().child('clients/$uid/logo');
+        await photoRef.putFile(data.profilePhoto, SettableMetadata(contentType: 'image/jpeg'));
+        photoUrl = await photoRef.getDownloadURL();
       } catch (e) {
         print("⚠️ Photo upload failed: $e");
       }
 
-      final cleanPhone = data.phoneNumber.replaceAll(RegExp(r'[^\d]'), '');
-      final standardPhone = '+91${cleanPhone.length == 10 ? cleanPhone : cleanPhone.substring(cleanPhone.length - 10)}';
-      
-      await _db.collection('clients').doc(uid).set({
-        'uid': uid,
-        'full_name': data.name,
-        'phone_number': standardPhone,
-        'email': data.email,
-        'company_name': data.companyName,
-        'company_reg_number': data.companyRegNumber,
-        'profile_photo_url': downloadUrl ?? '',
-        'account_created': FieldValue.serverTimestamp(),
-        'role': 'client',
-        'is_verified': true,
-        'is_active': true,
-      }, SetOptions(merge: true));
+      // 2. Upload GST Image -> clients/{uid}/gst
+      // MODIFIED: Wrapped in a null check since it is optional
+      if (data.gstImage != null) {
+        try {
+          final gstRef = _storage.ref().child('clients/$uid/gst');
+          await gstRef.putFile(data.gstImage!, SettableMetadata(contentType: 'image/jpeg'));
+          gstUrl = await gstRef.getDownloadURL();
+        } catch (e) {
+          print("⚠️ GST upload failed: $e");
+        }
+      }
 
-      return RegistrationResult(success: true, message: 'Registration successful', downloadUrl: downloadUrl, clientId: uid);
+      // 3. Upload PAN Image -> clients/{uid}/pan
+      try {
+        final panRef = _storage.ref().child('clients/$uid/pan');
+        await panRef.putFile(data.panImage, SettableMetadata(contentType: 'image/jpeg'));
+        panUrl = await panRef.getDownloadURL();
+      } catch (e) {
+        print("⚠️ PAN upload failed: $e");
+      }
+
+      // Create Map with EXACT SCHEMA requested
+      final Map<String, dynamic> clientData = {
+        'uid': uid,
+        'fullName': data.name,
+        'phoneNumber': standardPhone,
+        'email': data.email,
+        'company': data.companyName,
+        'registrationNumber': data.companyRegNumber,
+        'photoUrl': photoUrl ?? '',
+        'gstUrl': gstUrl ?? '',
+        'panUrl': panUrl ?? '',
+        'kycStatus': 'pending',
+        'role': 'client',
+        'createdAt': FieldValue.serverTimestamp(),
+      };
+
+      // Save to Firestore
+      await _db.collection('clients').doc(uid).set(clientData, SetOptions(merge: true));
+
+      return RegistrationResult(
+        success: true, 
+        message: 'Registration successful', 
+        downloadUrl: photoUrl, 
+        clientId: uid
+      );
     } catch (e) {
       return RegistrationResult(success: false, message: 'Registration failed: $e');
     }
   }
 
-  // ==================== BOOKING (NEW) ====================
+  // ==================== BOOKING ====================
   
   static Future<bool> createBookingRequest(Map<String, dynamic> bookingData) async {
     try {
@@ -363,7 +406,6 @@ class ClientDataService {
     });
   }
   
-  // ✅ ADDED THIS MISSING METHOD
   static Future<DeliveryInfo?> refreshBookingData(String documentId) async {
     try {
       final doc = await _db.collection('booking_requests').doc(documentId).get();

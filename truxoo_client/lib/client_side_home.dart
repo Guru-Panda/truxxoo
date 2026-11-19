@@ -8,9 +8,23 @@ import 'package:geolocator/geolocator.dart';
 import 'dart:io';
 import 'dart:async';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:back_button_interceptor/back_button_interceptor.dart';
 import 'package:flutter/services.dart';
 import 'client_side_my_accounts.dart';
+// 1. Firebase Imports
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart'; 
+import 'package:cached_network_image/cached_network_image.dart';
+
+// ✅ IMPORT OTP PAGE
+import 'otp.dart'; 
+
+// Colors
+const Color kPrimaryColor = Colors.black;
+const Color kAccentColor = Color(0xFF6BF15E);
+const Color kBackgroundColor = Color(0xFFF8F9FD);
 
 class ClientSideHome extends StatefulWidget {
   final String displayName;
@@ -23,13 +37,13 @@ class ClientSideHome extends StatefulWidget {
 
   const ClientSideHome({
     super.key,
-    this.displayName = 'Guru Prasad Panda',
-    this.displayProfilePicture = 'assets/client_image.webp',
+    this.displayName = 'Guest User',
+    this.displayProfilePicture = 'assets/client_imag_high.jpg',
     this.isUsingLocalImage = false,
-    this.clientPhone = "8875658758",
-    this.clientEmail = "guru34@gmail.com",
-    this.companyName = "ABC Logistics",
-    this.companyRegNumber = "REG123456789",
+    this.clientPhone = "",
+    this.clientEmail = "",
+    this.companyName = "",
+    this.companyRegNumber = "",
   });
 
   @override
@@ -41,8 +55,8 @@ class _ClientSideHomeState extends State<ClientSideHome> {
   int _selectedIndex = 0;
   DateTime? _lastBackPressTime;
   
-  // Profile data that can be updated
   late bool _isUsingLocalImage;
+  bool _isUsingNetworkImage = false; 
   late String _displayProfilePicture;
   late String _displayName;
   late String _clientPhone;
@@ -50,16 +64,17 @@ class _ClientSideHomeState extends State<ClientSideHome> {
   late String _companyName;
   late String _companyRegNumber;
   
-  final PageController _pageController = PageController(viewportFraction: 0.97);
-  Timer? _timer;
-  int _currentPage = 0;
+  final PageController _pageController = PageController(viewportFraction: 0.90);
   bool _hasLocationPermission = false;
+
+  FirebaseFirestore get _firestore => FirebaseFirestore.instanceFor(
+    app: Firebase.app(),
+    databaseId: 'truxoodriver', 
+  );
 
   @override
   void initState() {
     super.initState();
-    
-    // Initialize profile data from widget
     _displayName = widget.displayName;
     _displayProfilePicture = widget.displayProfilePicture;
     _isUsingLocalImage = widget.isUsingLocalImage;
@@ -68,328 +83,602 @@ class _ClientSideHomeState extends State<ClientSideHome> {
     _companyName = widget.companyName;
     _companyRegNumber = widget.companyRegNumber;
     
-    _startTimer();
     BackButtonInterceptor.add(_backButtonInterceptor);
-    
-    // Request location permission when app starts
-    _requestLocationPermission();
+    _fetchClientDetails(); 
+
+    // ✅ FIXED: Wait for transition, then start the smart location flow
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (mounted) {
+        _checkAndRequestLocation();
+      }
+    });
+  }
+
+  Future<void> _fetchClientDetails() async {
+    try {
+      final User? currentUser;
+      try {
+        currentUser = FirebaseAuth.instance.currentUser;
+      } catch (authError) {
+        debugPrint("Firebase Auth Error: $authError");
+        return; 
+      }
+
+      if (currentUser != null) {
+        DocumentSnapshot clientDoc = await _firestore
+            .collection('clients')
+            .doc(currentUser.uid)
+            .get();
+
+        if (clientDoc.exists && mounted) {
+          final data = clientDoc.data() as Map<String, dynamic>;
+
+          setState(() {
+            if (data.containsKey('fullName') && data['fullName'] != null) {
+              _displayName = data['fullName'];
+            }
+            if (data.containsKey('email') && data['email'] != null) {
+              _clientEmail = data['email'];
+            }
+            if (data.containsKey('phoneNumber')) {
+               _clientPhone = data['phoneNumber'];
+            }
+            if (data.containsKey('photoUrl') && 
+                data['photoUrl'] != null && 
+                data['photoUrl'].toString().isNotEmpty) {
+              _displayProfilePicture = data['photoUrl'];
+              _isUsingNetworkImage = true;
+              _isUsingLocalImage = false;
+            }
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint("Critical Error fetching client details: $e");
+    }
   }
 
   @override
   void dispose() {
     BackButtonInterceptor.remove(_backButtonInterceptor);
-    _timer?.cancel();
     _pageController.dispose();
     super.dispose();
   }
 
-  Future<void> _requestLocationPermission() async {
-    try {
-      // Check if location services are enabled
-      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        _showLocationServiceDialog();
-        return;
-      }
+  Widget _buildProfileImage({double size = 50}) {
+    if (_isUsingNetworkImage) {
+      return CachedNetworkImage(
+        imageUrl: _displayProfilePicture,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        placeholder: (context, url) => Container(color: Colors.grey[200]),
+        errorWidget: (context, url, error) => Image.asset('assets/client_imag_high.jpg', width: size, height: size, fit: BoxFit.cover),
+      );
+    } else if (_isUsingLocalImage) {
+      return Image.file(File(_displayProfilePicture), width: size, height: size, fit: BoxFit.cover);
+    } else {
+      return Image.asset(_displayProfilePicture, width: size, height: size, fit: BoxFit.cover);
+    }
+  }
 
-      // Check location permission
+  // ==================== NEW SMART LOCATION FLOW ====================
+
+  Future<void> _checkAndRequestLocation() async {
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) { 
+        _showLocationServiceDialog(); 
+        return; 
+      }
+      
+      // 1. Silently check if permission is already granted
       LocationPermission permission = await Geolocator.checkPermission();
       
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-
-      if (permission == LocationPermission.deniedForever) {
-        _showPermanentlyDeniedDialog();
+      if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+        if (mounted) setState(() => _hasLocationPermission = true);
         return;
       }
+      
+      // 2. If denied, show our friendly soft prompt first!
+      if (permission == LocationPermission.denied) {
+        if (mounted) _showLocationSoftPrompt();
+      } else if (permission == LocationPermission.deniedForever) {
+        if (mounted) _showPermanentlyDeniedDialog(); 
+      }
+    } catch (e) { 
+      print('Error checking location permission: $e'); 
+    }
+  }
 
-      if (permission == LocationPermission.whileInUse || 
-          permission == LocationPermission.always) {
-        if (mounted) {
-          setState(() {
-            _hasLocationPermission = true;
-          });
-          
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Location access granted! You can now use map features.'),
-              backgroundColor: Colors.green,
-              duration: Duration(seconds: 2),
+  void _showLocationSoftPrompt() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.location_on, color: Colors.black, size: 28),
+            SizedBox(width: 10),
+            Text('Location Access', style: TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: const Text(
+          'Unload needs access to your location to help you find nearby trucks, provide accurate live tracking, and ensure smooth logistics management.\n\nPlease allow location access on the next screen to get the best experience.',
+          style: TextStyle(fontSize: 14, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context); // User said no to the soft prompt
+            },
+            child: const Text('Not Now', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context); 
+              _requestSystemLocationPermission(); // User agreed, trigger the real system pop-up!
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.black,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
-          );
-        }
+            child: const Text('Allow', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _requestSystemLocationPermission() async {
+    try {
+      LocationPermission permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.deniedForever) {
+        if (mounted) _showPermanentlyDeniedDialog();
+        return;
+      }
+      if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+        if (mounted) setState(() => _hasLocationPermission = true);
       }
     } catch (e) {
-      print('Error requesting location permission: $e');
+      print('Error requesting system location permission: $e');
     }
   }
 
   void _showLocationServiceDialog() {
     showDialog(
       context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.location_off, color: Colors.orange),
-              SizedBox(width: 8),
-              Text('Location Services'),
-            ],
-          ),
-          content: const Text(
-            'Location services are disabled. Please enable location services in your device settings to use location-based features.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                Geolocator.openLocationSettings();
-              },
-              child: const Text('Settings'),
-            ),
-          ],
-        );
-      },
+      builder: (context) => AlertDialog(
+        title: const Text('Location Services Disabled'),
+        content: const Text('Please enable location services in your phone settings to use tracking features.'),
+        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK', style: TextStyle(color: Colors.black)))],
+      ),
     );
   }
-
+  
   void _showPermanentlyDeniedDialog() {
     showDialog(
       context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.location_disabled, color: Colors.red),
-              SizedBox(width: 8),
-              Text('Location Permission'),
-            ],
-          ),
-          content: const Text(
-            'Location permission is permanently denied. To use location features, please enable location permission in app settings.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                openAppSettings();
-              },
-              child: const Text('App Settings'),
-            ),
-          ],
-        );
-      },
+      builder: (context) => AlertDialog(
+        title: const Text('Location Permission Denied'),
+        content: const Text('Location permission is permanently denied. Please open your phone settings, go to Truxoo, and enable location access.'),
+        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK', style: TextStyle(color: Colors.black)))],
+      ),
     );
   }
 
-  void _startTimer() {
-    _timer = Timer.periodic(const Duration(seconds: 3), (Timer timer) {
-      if (!mounted) return;
-      
-      if (_currentPage < 1) {
-        _currentPage++;
-      } else {
-        _currentPage = 0;
-      }
-
-      if (_pageController.hasClients) {
-        _pageController.animateToPage(
-          _currentPage,
-          duration: const Duration(milliseconds: 350),
-          curve: Curves.easeIn,
-        );
-      }
-    });
-  }
+  // ==================== NAVIGATION ====================
 
   void _onItemTapped(int index) {
     if (_selectedIndex == index) return;
-    
-    setState(() {
-      _selectedIndex = index;
-    });
-
+    setState(() => _selectedIndex = index);
     switch (index) {
-      case 0:
-        // Already on home
-        break;
-      case 1:
-        _navigateToHistory();
-        break;
-      case 2:
-        _navigateToMap();
-        break;
-      case 3:
-        _navigateToMyAccount();
-        break;
+      case 1: _navigateToHistory(); break;
+      case 2: _navigateToMyAccount(); break; 
     }
   }
 
-  void _navigateToMap() {
-    if (!_hasLocationPermission) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Location permission required for map features'),
-          action: SnackBarAction(
-            label: 'Grant',
-            onPressed: _requestLocationPermission,
-          ),
-        ),
-      );
-      // Reset to home tab
-      setState(() {
-        _selectedIndex = 0;
-      });
-      return;
-    }
-    // TODO: Navigate to map page
-    print('Navigate to map');
-    // Reset to home tab for now since map page doesn't exist
-    setState(() {
-      _selectedIndex = 0;
+  void _handleDrawerNavigation(VoidCallback navigateFunction) {
+    _scaffoldKey.currentState?.closeDrawer(); 
+    Future.delayed(const Duration(milliseconds: 250), () {
+      if (mounted) {
+        navigateFunction(); 
+      }
     });
   }
 
   void _navigateToMyAccount() {
-    // Close drawer if open
-    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
-      Navigator.pop(context);
-    }
-    
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => MyAccountClient(
-          currentProfileImagePath: _displayProfilePicture,
-          isLocalImage: _isUsingLocalImage,
-          clientName: _displayName,
-          clientPhone: _clientPhone,
-          clientEmail: _clientEmail,
-          companyName: _companyName,
-          companyRegNumber: _companyRegNumber,
-        ),
-      ),
-    ).then((_) {
-      // Reset selected index when returning
-      if (mounted) {
-        setState(() {
-          _selectedIndex = 0;
-        });
-      }
+    Navigator.push(context, MaterialPageRoute(builder: (context) => MyAccountClient(
+      currentProfileImagePath: _displayProfilePicture,
+      isLocalImage: _isUsingLocalImage, 
+      clientName: _displayName,
+      clientPhone: _clientPhone,
+      clientEmail: _clientEmail,
+      companyName: _companyName,
+      companyRegNumber: _companyRegNumber,
+    ))).then((_) {
+      if (mounted) { setState(() => _selectedIndex = 0); _fetchClientDetails(); }
     });
   }
 
   void _navigateToHistory() {
-    // Close drawer if open
-    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
-      Navigator.pop(context);
-    }
-    
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => ClientHistory(
-          displayName: _displayName,
-          displayProfilePicture: _displayProfilePicture,
-          isUsingLocalImage: _isUsingLocalImage,
-        ),
-      ),
-    ).then((_) {
-      // Reset selected index when returning
-      if (mounted) {
-        setState(() {
-          _selectedIndex = 0;
-        });
-      }
+    Navigator.push(context, MaterialPageRoute(builder: (context) => ClientHistory(
+      displayName: _displayName, 
+      displayProfilePicture: _displayProfilePicture, 
+      isUsingLocalImage: _isUsingLocalImage
+    ))).then((_) { 
+      if (mounted) setState(() => _selectedIndex = 0); 
     });
   }
 
   void _navigateToTrackTruck() {
-    // Close drawer if open
-    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
-      Navigator.pop(context);
+    Navigator.push(context, MaterialPageRoute(builder: (context) => TrackTruck(
+      displayName: _displayName, 
+      displayProfilePicture: _displayProfilePicture, 
+      isUsingLocalImage: _isUsingLocalImage
+    )));
+  }
+
+  bool _backButtonInterceptor(bool stopDefaultButtonEvent, RouteInfo info) {
+    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) { 
+      _scaffoldKey.currentState?.closeDrawer(); 
+      return true; 
     }
-    
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => TrackTruck(
-          displayName: _displayName,
-          displayProfilePicture: _displayProfilePicture,
-          isUsingLocalImage: _isUsingLocalImage,
+    if (_selectedIndex != 0) { setState(() => _selectedIndex = 0); return true; }
+    final now = DateTime.now();
+    if (_lastBackPressTime == null || now.difference(_lastBackPressTime!) > const Duration(seconds: 2)) {
+      _lastBackPressTime = now;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Press back again to exit'), duration: Duration(seconds: 2)));
+      return true;
+    }
+    SystemNavigator.pop();
+    return true;
+  }
+
+  Future<void> _launchUrl(String url, String title) async {
+    final Uri uri = Uri.parse(url);
+    try { 
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) throw 'Could not launch'; 
+    } catch (e) { 
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error launching $title'))); 
+    }
+  }
+
+  Future<void> _cancelRide(String bookingId) async {
+    bool confirm = await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Cancel Ride?"),
+        content: const Text("Are you sure you want to cancel this booking?"),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("No")),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("Yes, Cancel", style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    ) ?? false;
+
+    if (confirm) {
+      await _firestore.collection('booking_requests').doc(bookingId).update({
+        'status': 'cancelled',
+        'cancelledBy': 'client',
+        'cancelledAt': FieldValue.serverTimestamp(),
+      });
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ride Cancelled")));
+    }
+  }
+
+  Widget _buildActiveBookingSection() {
+    final User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) return const SizedBox.shrink();
+
+    return StreamBuilder<QuerySnapshot>(
+      stream: _firestore
+          .collection('booking_requests')
+          .where('clientId', isEqualTo: user.uid)
+          .where('status', whereIn: ['pending', 'accepted', 'assigned', 'otp_pending', 'in_progress']) 
+          .orderBy('createdAt', descending: true)
+          .snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const SizedBox.shrink(); 
+
+        final docs = snapshot.data!.docs;
+
+        return Container(
+          height: 160, 
+          margin: const EdgeInsets.only(bottom: 20),
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            itemCount: docs.length,
+            itemBuilder: (context, index) {
+              var doc = docs[index];
+              var data = doc.data() as Map<String, dynamic>;
+              String status = data['status'];
+              String bookingId = doc.id;
+              String trackingId = data['trackingId'] ?? 'N/A';
+              String pickup = data['pickupLocation'] ?? 'Unknown';
+              String drop = data['dropLocation'] ?? 'Unknown';
+
+              return Container(
+                width: MediaQuery.of(context).size.width * 0.82,
+                margin: const EdgeInsets.only(right: 16, bottom: 10, left: 2), 
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: kAccentColor.withOpacity(0.5), width: 1.5),
+                  boxShadow: [
+                    BoxShadow(color: kAccentColor.withOpacity(0.1), blurRadius: 10, offset: const Offset(0, 5))
+                  ],
+                ),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () {
+                      if (status != 'pending') {
+                        Future.delayed(const Duration(milliseconds: 100), () {
+                          if (mounted) {
+                            Navigator.push(
+                              context, 
+                              MaterialPageRoute(builder: (context) => OTPPage(bookingId: bookingId, trackingId: trackingId))
+                            );
+                          }
+                        });
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Searching for your load... Please wait.")));
+                      }
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(color: kAccentColor, borderRadius: BorderRadius.circular(20)),
+                                child: Text(status == 'pending' ? 'SEARCHING' : 'ONGOING RIDE', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.black)),
+                              ),
+                              IconButton(onPressed: () => _cancelRide(bookingId), icon: const Icon(Icons.close, color: Colors.red, size: 22)),
+                            ],
+                          ),
+                          const Spacer(),
+                          Row(
+                            children: [
+                              const Icon(Icons.local_shipping_outlined, size: 28, color: Colors.black87),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text("$pickup ➝ $drop", style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                    const SizedBox(height: 4),
+                                    Text("ID: $trackingId", style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+                                  ],
+                                ),
+                              ),
+                              const Icon(Icons.arrow_forward_ios, size: 16, color: Colors.grey),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final double headerHeight = 110.0; 
+
+    return Scaffold(
+      key: _scaffoldKey,
+      backgroundColor: kBackgroundColor,
+      drawer: _buildDrawer(), 
+      // Updated with Font Awesome Icon
+      floatingActionButton: FloatingActionButton(
+        onPressed: _launchWhatsApp,
+        backgroundColor: const Color(0xFF25D366), // Official WhatsApp Green
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        elevation: 4,
+        child: const FaIcon(
+          FontAwesomeIcons.whatsapp, 
+          color: Colors.white, 
+          size: 28,
+        ),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+      body: Stack(
+        children: [
+          SingleChildScrollView(
+            child: Column(
+              children: [
+                SizedBox(height: headerHeight + 25), 
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Services', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black87)),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        height: 145,
+                        child: ListView(
+                          scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(),
+                          children: const [
+                            ModernServiceCard(image: 'assets/logistics.jpg', title: 'Logistics Management'),
+                            ModernServiceCard(image: 'assets/pre-booking.webp', title: 'Pre-booking'),
+                            ModernServiceCard(image: 'assets/live-tracking.jpg', title: 'Live Tracking'),
+                            ModernServiceCard(image: 'assets/24seven.jpg', title: '24/7 Support'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Container(
+                        width: double.infinity,
+                        height: 60,
+                        decoration: BoxDecoration(
+                          color: Colors.black,
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 10, offset: const Offset(0, 4))],
+                        ),
+                        child: Material(
+                          color: Colors.transparent,
+                          child: InkWell(
+                            onTap: _navigateToTrackTruck,
+                            borderRadius: BorderRadius.circular(12),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 20),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.all(6),
+                                        decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), shape: BoxShape.circle),
+                                        child: const Icon(Icons.gps_fixed, color: kAccentColor, size: 20),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      const Text('Track Shipment', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
+                                  const Icon(Icons.arrow_forward_rounded, color: Colors.white, size: 20),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 30),
+                      _buildActiveBookingSection(),
+                      const Text('Highlights', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black87)),
+                      const SizedBox(height: 15),
+                      SizedBox(
+                        height: 170,
+                        child: PageView(
+                          controller: _pageController,
+                          children: const [
+                            PromoImage(image: 'assets/client_imag_high.jpg'),
+                            PromoImage(image: 'assets/poster1.jpeg'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 30),
+                      const Text('Benefits', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black87)),
+                      const SizedBox(height: 15),
+                      SizedBox(
+                        height: 220,
+                        child: PageView(
+                          controller: PageController(viewportFraction: 0.90),
+                          children: const [
+                            BenefitCard(image: 'assets/poster3.jpeg', title: 'Live Tracking'),
+                            BenefitCard(image: 'assets/poster4.jpeg', title: 'Logistics Digitalized'),
+                            BenefitCard(image: 'assets/poster6.jpeg', title: 'Connecting India'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 100), 
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Positioned(
+            top: 0, left: 0, right: 0, height: headerHeight,
+            child: Container(
+              decoration: const BoxDecoration(color: kPrimaryColor, borderRadius: BorderRadius.only(bottomLeft: Radius.circular(25), bottomRight: Radius.circular(25))),
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 20, 0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween, 
+                    crossAxisAlignment: CrossAxisAlignment.start, 
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4.0), 
+                        child: GestureDetector(onTap: () => _scaffoldKey.currentState?.openDrawer(), child: const Icon(Icons.menu, color: Colors.white, size: 28)),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          mainAxisSize: MainAxisSize.min, 
+                          children: [
+                            Text('Welcome Back,', style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 12)),
+                            const SizedBox(height: 2),
+                            Text(_displayName, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), textAlign: TextAlign.end, maxLines: 2, overflow: TextOverflow.ellipsis),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(top: headerHeight - 25, left: 20, right: 20, child: _buildFloatingSearchBar()),
+        ],
+      ),
+      bottomNavigationBar: _buildModernBottomNav(),
+    );
+  }
+
+  Widget _buildFloatingSearchBar() {
+    return GestureDetector(
+      onTap: () async {
+        final result = await Navigator.push(context, MaterialPageRoute(builder: (context) => const LocationSelectionPage()));
+        if (result != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Selected: ${result['pickup']} → ${result['dropoff']}')));
+      },
+      child: Container(
+        height: 50,
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 15, offset: const Offset(0, 5))]),
+        child: Row(
+          children: [
+            const SizedBox(width: 15),
+            const Icon(Icons.search, color: kPrimaryColor),
+            const SizedBox(width: 10),
+            const Text('Where To?', style: TextStyle(color: Colors.grey, fontSize: 16, fontWeight: FontWeight.w600)),
+            const Spacer(),
+            if (!_hasLocationPermission)
+              GestureDetector(
+                onTap: _checkAndRequestLocation, // ✅ UPDATED to use smart flow
+                child: Container(
+                  margin: const EdgeInsets.only(right: 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(color: Colors.orange.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                  child: const Text('Enable GPS', style: TextStyle(color: Colors.orange, fontSize: 10, fontWeight: FontWeight.bold)),
+                ),
+              ),
+          ],
         ),
       ),
     );
   }
 
-  bool _backButtonInterceptor(bool stopDefaultButtonEvent, RouteInfo info) {
-    // If drawer is open, close it
-    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
-      Navigator.pop(context);
-      return true;
-    }
-    
-    // If not on home tab, switch to home tab
-    if (_selectedIndex != 0) {
-      setState(() {
-        _selectedIndex = 0;
-      });
-      return true;
-    }
-    
-    // Double press to exit
-    final now = DateTime.now();
-    if (_lastBackPressTime == null || 
-        now.difference(_lastBackPressTime!) > const Duration(seconds: 2)) {
-      _lastBackPressTime = now;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Press back again to exit'),
-          duration: Duration(seconds: 2),
-        ),
-      );
-      return true;
-    }
-    
-    // Exit app
-    SystemNavigator.pop();
-    return true;
-  }
-
-  Widget _buildNavItem(int index, IconData icon, String label) {
-    final isSelected = _selectedIndex == index;
-    
-    return Expanded(
-      child: InkWell(
-        onTap: () => _onItemTapped(index),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+  Widget _buildModernBottomNav() {
+    return Container(
+      decoration: BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 20, offset: const Offset(0, -5))]),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
-              Icon(
-                icon,
-                color: isSelected ? Colors.black : Colors.grey,
-                size: 24,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                label,
-                style: TextStyle(
-                  color: isSelected ? Colors.black : Colors.grey,
-                  fontSize: 12,
-                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                ),
-              ),
+              _buildModernNavItem(0, Icons.grid_view_rounded, 'Home'),
+              _buildModernNavItem(1, Icons.history_rounded, 'History'),
+              _buildModernNavItem(2, Icons.person_outline_rounded, 'Profile'), 
             ],
           ),
         ),
@@ -397,20 +686,123 @@ class _ClientSideHomeState extends State<ClientSideHome> {
     );
   }
 
-  Future<void> _launchUrl(String url, String title) async {
-    final Uri uri = Uri.parse(url);
+  Widget _buildModernNavItem(int index, IconData icon, String label) {
+    final isSelected = _selectedIndex == index;
+    return GestureDetector(
+      onTap: () => _onItemTapped(index),
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(color: isSelected ? Colors.black : Colors.transparent, borderRadius: BorderRadius.circular(20)),
+        child: Row(
+          children: [
+            Icon(icon, color: isSelected ? Colors.white : Colors.grey, size: 24),
+            if (isSelected) ...[const SizedBox(width: 8), Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12))],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDrawer() {
+    final User? currentUser = FirebaseAuth.instance.currentUser;
+    return Drawer(
+      child: StreamBuilder<DocumentSnapshot>(
+        stream: currentUser != null ? _firestore.collection('clients').doc(currentUser.uid).snapshots() : null,
+        builder: (context, snapshot) {
+          String dName = _displayName;
+          String dEmail = _clientEmail;
+          Widget dImage = _buildProfileImage(size: 60);
+
+          if (snapshot.hasData && snapshot.data != null && snapshot.data!.exists) {
+            final data = snapshot.data!.data() as Map<String, dynamic>;
+            if (data['fullName'] != null) dName = data['fullName'];
+            if (data['email'] != null) dEmail = data['email'];
+            if (data['photoUrl'] != null && data['photoUrl'].toString().isNotEmpty) {
+              dImage = CachedNetworkImage(imageUrl: data['photoUrl'], width: 60, height: 60, fit: BoxFit.cover, placeholder: (c, u) => const CircularProgressIndicator(), errorWidget: (c, u, e) => Image.asset('assets/client_imag_high.jpg'));
+            }
+          }
+
+          return ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              DrawerHeader(
+                decoration: const BoxDecoration(color: Colors.black),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    ClipOval(child: Container(color: Colors.white, width: 60, height: 60, child: dImage)),
+                    const SizedBox(height: 10),
+                    Text(dName, style: const TextStyle(color: Colors.white, fontSize: 16)),
+                    Text(dEmail, style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 12)),
+                  ],
+                ),
+              ),
+              
+              ListTile(
+                leading: const Icon(Icons.help_center_rounded),
+                title: const Text('Help Center'),
+                onTap: () { 
+                  _scaffoldKey.currentState?.closeDrawer(); 
+                  _launchUrl('https://unloadweb.com/help-center.html', 'Help Center'); 
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.question_answer),
+                title: const Text('FAQs'),
+                onTap: () { 
+                  _scaffoldKey.currentState?.closeDrawer(); 
+                  _launchUrl('https://unloadweb.com/index.html#faq', 'FAQs'); 
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.description),
+                title: const Text('Terms & Conditions'),
+                onTap: () { 
+                  _scaffoldKey.currentState?.closeDrawer(); 
+                  _launchUrl('https://unloadweb.com/tc.html', 'Terms & Conditions'); 
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.privacy_tip),
+                title: const Text('Privacy Policy'),
+                onTap: () { 
+                  _scaffoldKey.currentState?.closeDrawer(); 
+                  _launchUrl('https://unloadweb.com/privacy.html', 'Privacy Policy'); 
+                },
+              ),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.logout, color: Colors.red), 
+                title: const Text('Log Out', style: TextStyle(color: Colors.red)), 
+                onTap: () { 
+                  _scaffoldKey.currentState?.closeDrawer(); 
+                  _showLogoutDialog(); 
+                }
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _launchWhatsApp() async {
+    final Uri whatsappUrl = Uri.parse("https://wa.me/919938309966");
     try {
-      if (!await launchUrl(uri)) {
+      if (!await launchUrl(whatsappUrl, mode: LaunchMode.externalApplication)) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not launch $title')),
+            const SnackBar(content: Text('Could not launch WhatsApp')),
           );
         }
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error launching $title')),
+          const SnackBar(content: Text('Error opening WhatsApp')),
         );
       }
     }
@@ -424,18 +816,12 @@ class _ClientSideHomeState extends State<ClientSideHome> {
           title: const Text('Logout'),
           content: const Text('Are you sure you want to logout?'),
           actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
             TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(dialogContext); // Close dialog
-                Navigator.pop(context); // Close drawer
-                Navigator.of(context).pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (context) => const OnboardingPage()),
-                  (Route<dynamic> route) => false,
-                );
+              onPressed: () async {
+                Navigator.pop(dialogContext); // Closes dialog
+                await FirebaseAuth.instance.signOut();
+                if (mounted) Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (context) => const OnboardingPage()), (route) => false);
               },
               child: const Text('Logout', style: TextStyle(color: Colors.red)),
             ),
@@ -444,514 +830,67 @@ class _ClientSideHomeState extends State<ClientSideHome> {
       },
     );
   }
+}
 
+class ModernServiceCard extends StatelessWidget {
+  final String image;
+  final String title;
+  
+  const ModernServiceCard({super.key, required this.image, required this.title});
+  
   @override
   Widget build(BuildContext context) {
-    final double screenHeight = MediaQuery.of(context).size.height;
-    
-    return Scaffold(
-      key: _scaffoldKey,
-      appBar: PreferredSize(
-        preferredSize: Size.fromHeight(screenHeight * 0.07),
-        child: AppBar(
-          backgroundColor: Colors.black,
-          leading: Builder(
-            builder: (context) => IconButton(
-              icon: const Icon(Icons.menu, color: Colors.white),
-              onPressed: () => Scaffold.of(context).openDrawer(),
-            ),
-          ),
-          centerTitle: false,
-          actions: const [
-            Padding(
-              padding: EdgeInsets.only(right: 16.0),
-              child: Center(
-                child: Text(
-                  'Truxoo',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
+    return Container(
+      width: 120, 
+      margin: const EdgeInsets.only(right: 15, bottom: 5, top: 5),
+      decoration: BoxDecoration(
+        color: Colors.white, 
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.withOpacity(0.15), width: 1), // Thin crisp border
       ),
-      
-      drawer: _buildDrawer(),
-      
-      body: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // "Where To?" search field
-              _buildSearchField(),
-
-              const SizedBox(height: 80),
-
-              // Services Section
-              const Text(
-                'Services',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-
-              const SizedBox(height: 15),
-              
-              // Service Cards
-              SizedBox(
-                height: 141,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  children: const [
-                    ServiceCard(
-                      image: 'assets/driver_image.webp',
-                      title: 'Logistics',
-                    ),
-                    ServiceCard(
-                      image: 'assets/driver_image.webp',
-                      title: 'Pre-booking', 
-                    ),
-                    ServiceCard(
-                      image: 'assets/driver_image.webp',
-                      title: 'MCVs', 
-                    ),
-                    ServiceCard(
-                      image: 'assets/driver_image.webp',
-                      title: 'Container', 
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 5),
-              
-              // Track the Truck Button
-              SizedBox(
-                width: 160,
-                child: ElevatedButton(
-                  onPressed: _navigateToTrackTruck,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF6BF15E),
-                    foregroundColor: const Color.fromARGB(255, 0, 0, 0),
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    elevation: 1,
-                  ),
-                  child: const Text(
-                    'Track the Truck',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 30),
-
-              // Image Carousel
-              SizedBox(
-                height: 170,
-                child: PageView(
-                  controller: _pageController, 
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 2),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(20),
-                        child: Image.asset(
-                          'assets/driver_image.webp',
-                          fit: BoxFit.cover,
-                          width: double.infinity,
-                        ),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 2),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(20),
-                        child: Image.asset(
-                          'assets/driver_image.webp',
-                          fit: BoxFit.cover,
-                          width: double.infinity,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 30),
-
-              // Benefits Section
-              const Text(
-                'Benefits',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-
-              const SizedBox(height: 15),
-
-              SizedBox(
-                height: 230,
-                child: PageView(
-                  controller: PageController(viewportFraction: 0.97),
-                  children: const [
-                    BenefitCard(
-                      image: 'assets/driver_image.webp',
-                      title: 'Connecting India',
-                    ),
-                    BenefitCard(
-                      image: 'assets/driver_image.webp',
-                      title: 'Logistics Digitalized',
-                    ),
-                    BenefitCard(
-                      image: 'assets/driver_image.webp',
-                      title: 'Live Tracking',
-                    ),
-                  ],
-                ),
-              ), 
-            ],
-          ),
-        ),
-      ),
-      
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.grey.withOpacity(0.2),
-              spreadRadius: 1,
-              blurRadius: 5,
-              offset: const Offset(0, -1),
-            ),
-          ],
-          border: Border(
-            top: BorderSide(
-              color: Colors.grey.shade300,
-              width: 1.0,
-            ),
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            _buildNavItem(0, Icons.home, 'Home'),
-            _buildNavItem(1, Icons.history, 'History'),
-            _buildNavItem(2, Icons.location_on, 'Map'),
-            _buildNavItem(3, Icons.person, 'Profile'),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSearchField() {
-    return InkWell(
-      onTap: () async {
-        final result = await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const LocationSelectionPage(),
-          ),
-        );
-        
-        if (result != null && mounted) {
-          print('Pickup: ${result['pickup']}');
-          print('Dropoff: ${result['dropoff']}');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Selected: ${result['pickup']} → ${result['dropoff']}'),
-              duration: const Duration(seconds: 2),
-            ),
-          );
-        }
-      },
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.grey[100],
-          borderRadius: BorderRadius.circular(30),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.grey.withOpacity(0.2),
-              spreadRadius: 0,
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: 20,
-            vertical: 15,
-          ),
-          child: Row(
-            children: [
-              Icon(
-                Icons.search,
-                color: Colors.grey[600],
-              ),
-              const SizedBox(width: 12),
-              const Text(
-                'Where To?',
-                style: TextStyle(
-                  color: Color.fromARGB(255, 25, 25, 25),
-                  fontSize: 19,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const Spacer(),
-              if (!_hasLocationPermission)
-                GestureDetector(
-                  onTap: _requestLocationPermission,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Text(
-                      'Enable Location',
-                      style: TextStyle(
-                        color: Colors.orange,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDrawer() {
-    return Drawer(
-      child: ListView(
-        padding: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start, 
         children: [
-          DrawerHeader(
-            decoration: const BoxDecoration(
-              color: Colors.black,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                CircleAvatar(
-                  radius: 30,
-                  backgroundColor: Colors.white,
-                  backgroundImage: _isUsingLocalImage 
-                    ? FileImage(File(_displayProfilePicture))
-                    : AssetImage(_displayProfilePicture) as ImageProvider,
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  _displayName,  
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                  ),
-                ),
-                Text(
-                  _clientEmail,  
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.7),
-                    fontSize: 12,
-                  ),
-                ),
-              ],
-            ),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(11)), // Matches container border minus 1
+              child: Image.asset(image, width: double.infinity, fit: BoxFit.cover)
+            )
           ),
-          ListTile(
-            leading: const Icon(Icons.person),
-            title: const Text('My Account'),
-            onTap: _navigateToMyAccount, 
+          Padding(
+            padding: const EdgeInsets.all(12), 
+            child: Text(
+              title, 
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12, letterSpacing: 0.2), // Tighter, slightly smaller font
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            )
           ),
-          ListTile(
-            leading: const Icon(Icons.history),
-            title: const Text('History & Payments'),
-            onTap: _navigateToHistory,
-          ),
-          ListTile(
-            leading: const Icon(Icons.location_on),
-            title: const Text('Track the Truck'),
-            onTap: _navigateToTrackTruck,
-          ),
-          const Divider(),
-          ListTile(
-            leading: Icon(
-              _hasLocationPermission ? Icons.location_on : Icons.location_off,
-              color: _hasLocationPermission ? Colors.green : Colors.orange,
-            ),
-            title: Text(_hasLocationPermission ? 'Location Enabled' : 'Enable Location'),
-            subtitle: Text(_hasLocationPermission 
-              ? 'Location access granted' 
-              : 'Tap to enable location access'),
-            onTap: _hasLocationPermission ? null : _requestLocationPermission,
-          ),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.question_answer),
-            title: const Text('FAQs'),
-            onTap: () async {
-              Navigator.pop(context);
-              await _launchUrl('https://www.truxxo.com/faqs', 'FAQs');
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.description),
-            title: const Text('Terms & Conditions'),
-            onTap: () async {
-              Navigator.pop(context);
-              await _launchUrl('https://www.truxoo.com/terms', 'Terms & Conditions');
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.support_agent),
-            title: const Text('Helpline'),
-            onTap: () async {
-              Navigator.pop(context);
-              await _launchUrl('https://www.truxoo.com/helpline', 'Helpline');
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.info),
-            title: const Text('About Us'),
-            onTap: () async {
-              Navigator.pop(context);
-              await _launchUrl('https://www.truxoo.com/about-us', 'About Us');
-            },
-          ),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.logout, color: Colors.red),
-            title: const Text('Log Out', style: TextStyle(color: Colors.red)),
-            onTap: _showLogoutDialog,
-          ),
-        ],
+        ]
       ),
     );
   }
 }
 
-class ServiceCard extends StatelessWidget {
+class PromoImage extends StatelessWidget {
   final String image;
-  final String title;
-  
-  const ServiceCard({
-    super.key,
-    required this.image,
-    required this.title,
-  });
-
+  const PromoImage({super.key, required this.image});
   @override
   Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final cardWidth = (screenWidth - 32) / 3;
-
-    return Container(
-      width: cardWidth,
-      margin: const EdgeInsets.only(right: 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.04),
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.grey.withOpacity(0.0),
-            spreadRadius: 0,
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ClipRRect(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-            child: Image.asset(
-              image,
-              height: 90,
-              width: double.infinity,
-              fit: BoxFit.cover,
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(5),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 4),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
+    return Container(margin: const EdgeInsets.symmetric(horizontal: 5), child: ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.asset(image, fit: BoxFit.cover, width: double.infinity)));
   }
 }
 
 class BenefitCard extends StatelessWidget {
   final String image;
   final String title;
-
-  const BenefitCard({
-    super.key,
-    required this.image,
-    required this.title,
-  });
-
+  const BenefitCard({super.key, required this.image, required this.title});
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2),
-      child: Column(
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(20),
-            child: Image.asset(
-              image,
-              height: 170,
-              width: double.infinity,
-              fit: BoxFit.cover,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 18,
-            ),
-          ),
-          const SizedBox(height: 4),
-        ],
-      ),
-    );
+    return Container(margin: const EdgeInsets.symmetric(horizontal: 5), child: Column(children: [
+        ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.asset(image, height: 160, width: double.infinity, fit: BoxFit.cover)),
+        const SizedBox(height: 10),
+        Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+    ]));
   }
 }

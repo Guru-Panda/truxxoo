@@ -4,8 +4,9 @@ import 'package:google_places_flutter/model/prediction.dart';
 import 'package:back_button_interceptor/back_button_interceptor.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart'; // ✅ Added
-import 'user_selection_page.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart'; 
+import 'sender_details_page.dart'; 
 
 class LocationSelectionPage extends StatefulWidget {
   const LocationSelectionPage({super.key});
@@ -17,9 +18,11 @@ class LocationSelectionPage extends StatefulWidget {
 class _LocationSelectionPageState extends State<LocationSelectionPage> {
   final TextEditingController _pickupController = TextEditingController();
   final TextEditingController _dropoffController = TextEditingController();
-  final String googleApiKey = "AIzaSyDTCzneUhpD2e-HinMiRhUGKlfX_D7fn9c";
+  
+  // ✅ SECURE: Fetching API Key from .env
+  final String googleApiKey = dotenv.env['GOOGLE_MAPS_API_KEY'] ?? "";
 
-  // ✅ Map State Variables
+  // Map State Variables
   GoogleMapController? _mapController;
   Set<Marker> _markers = {};
   Set<Polyline> _polylines = {};
@@ -33,6 +36,7 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
   double? _dropoffLng;
 
   bool _isFetchingLocation = false;
+  bool _isSubmitting = false;
 
   @override
   void initState() {
@@ -58,10 +62,51 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
     Navigator.pop(context);
   }
 
-  void _navigateToUserSelection() {
+  // ✅ NEW: Fallback for when user types but forgets to click the dropdown
+  Future<void> _manualGeocodeFallback(String address, bool isPickup) async {
+    try {
+      List<Location> locations = await locationFromAddress(address);
+      if (locations.isNotEmpty) {
+        setState(() {
+          if (isPickup) {
+            _pickupLat = locations.first.latitude;
+            _pickupLng = locations.first.longitude;
+          } else {
+            _dropoffLat = locations.first.latitude;
+            _dropoffLng = locations.first.longitude;
+          }
+        });
+        _updateMap();
+      }
+    } catch (e) {
+      debugPrint("Geocoding failed for $address: $e");
+    }
+  }
+
+  // ✅ UPDATED: Navigation logic now async and includes geocoding fallback
+  Future<void> _navigateToSenderDetails() async {
+    FocusScope.of(context).unfocus(); 
+    
+    setState(() => _isSubmitting = true);
+
+    // Trigger fallback geocoding if text exists but coordinates are missing
+    if (_pickupLat == null && _pickupController.text.isNotEmpty) {
+      await _manualGeocodeFallback(_pickupController.text, true);
+    }
+    if (_dropoffLat == null && _dropoffController.text.isNotEmpty) {
+      await _manualGeocodeFallback(_dropoffController.text, false);
+    }
+
+    setState(() => _isSubmitting = false);
+
+    if (!mounted) return;
+
     if (_pickupLat == null || _pickupLng == null || _dropoffLat == null || _dropoffLng == null) {
        ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select valid locations from the list')),
+        const SnackBar(
+          content: Text('Please select valid locations from the list'),
+          backgroundColor: Colors.red,
+        ),
       );
       return;
     }
@@ -69,7 +114,7 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => UserSelectionPage(
+        builder: (context) => SenderDetailsPage(
           pickupLocation: _pickupController.text,
           dropoffLocation: _dropoffController.text,
           pickupLat: _pickupLat!,
@@ -81,14 +126,12 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
     );
   }
 
-  // ✅ FUNCTION: Update Map Markers & Camera
   void _updateMap() {
     Set<Marker> newMarkers = {};
     Set<Polyline> newPolylines = {};
     LatLng? pickupPos;
     LatLng? dropPos;
 
-    // 1. Setup Pickup Marker
     if (_pickupLat != null && _pickupLng != null) {
       pickupPos = LatLng(_pickupLat!, _pickupLng!);
       newMarkers.add(Marker(
@@ -99,7 +142,6 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
       ));
     }
 
-    // 2. Setup Dropoff Marker
     if (_dropoffLat != null && _dropoffLng != null) {
       dropPos = LatLng(_dropoffLat!, _dropoffLng!);
       newMarkers.add(Marker(
@@ -110,7 +152,6 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
       ));
     }
 
-    // 3. Draw Line (Polyline)
     if (pickupPos != null && dropPos != null) {
       newPolylines.add(Polyline(
         polylineId: const PolylineId('route'),
@@ -126,20 +167,24 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
       _polylines = newPolylines;
     });
 
-    // 4. Animate Camera to fit points
     if (_mapController != null) {
       if (pickupPos != null && dropPos != null) {
-        LatLngBounds bounds = LatLngBounds(
-          southwest: LatLng(
-            pickupPos.latitude < dropPos.latitude ? pickupPos.latitude : dropPos.latitude,
-            pickupPos.longitude < dropPos.longitude ? pickupPos.longitude : dropPos.longitude,
-          ),
-          northeast: LatLng(
-            pickupPos.latitude > dropPos.latitude ? pickupPos.latitude : dropPos.latitude,
-            pickupPos.longitude > dropPos.longitude ? pickupPos.longitude : dropPos.longitude,
-          ),
-        );
-        _mapController!.animateCamera(CameraUpdate.newLatLngBounds(bounds, 50));
+        // ✅ FIXED: Prevent CameraBounds crash if Pickup and Dropoff are identical
+        if (pickupPos == dropPos) {
+          _mapController!.animateCamera(CameraUpdate.newLatLngZoom(pickupPos, 15));
+        } else {
+          LatLngBounds bounds = LatLngBounds(
+            southwest: LatLng(
+              pickupPos.latitude < dropPos.latitude ? pickupPos.latitude : dropPos.latitude,
+              pickupPos.longitude < dropPos.longitude ? pickupPos.longitude : dropPos.longitude,
+            ),
+            northeast: LatLng(
+              pickupPos.latitude > dropPos.latitude ? pickupPos.latitude : dropPos.latitude,
+              pickupPos.longitude > dropPos.longitude ? pickupPos.longitude : dropPos.longitude,
+            ),
+          );
+          _mapController!.animateCamera(CameraUpdate.newLatLngBounds(bounds, 50));
+        }
       } else if (pickupPos != null) {
         _mapController!.animateCamera(CameraUpdate.newLatLngZoom(pickupPos, 15));
       } else if (dropPos != null) {
@@ -148,8 +193,9 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
     }
   }
 
-  // ✅ FUNCTION: Open Full Screen Map
   void _openFullScreenMap() {
+    FocusScope.of(context).unfocus();
+    
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -165,7 +211,9 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
   }
 
   Future<void> _getCurrentLocation() async {
+    FocusScope.of(context).unfocus(); 
     setState(() => _isFetchingLocation = true);
+    
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) throw 'Location services are disabled.';
@@ -186,51 +234,86 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
       if (placemarks.isNotEmpty) {
         Placemark place = placemarks.first;
         String address = [place.name, place.subLocality, place.locality, place.postalCode]
-            .where((e) => e != null && e.isNotEmpty).join(', ');
-        setState(() => _pickupController.text = address);
+            .where((e) => e != null && e!.isNotEmpty).join(', ');
+        
+        setState(() {
+          _pickupController.text = address;
+        });
       }
-      
-      // Update the Map
       _updateMap();
 
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: Colors.red));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: Colors.red));
     } finally {
-      setState(() => _isFetchingLocation = false);
+      if (mounted) setState(() => _isFetchingLocation = false);
     }
   }
 
-  void _onPickupSelected(Prediction prediction) {
+  void _onPickupLatLngFetched(Prediction prediction) {
     setState(() {
-      _pickupController.text = prediction.description ?? '';
       if (prediction.lat != null) _pickupLat = double.tryParse(prediction.lat!);
       if (prediction.lng != null) _pickupLng = double.tryParse(prediction.lng!);
-      // Update Map
       _updateMap();
     });
   }
 
-  void _onDropoffSelected(Prediction prediction) {
+  void _onDropoffLatLngFetched(Prediction prediction) {
     setState(() {
-      _dropoffController.text = prediction.description ?? '';
       if (prediction.lat != null) _dropoffLat = double.tryParse(prediction.lat!);
       if (prediction.lng != null) _dropoffLng = double.tryParse(prediction.lng!);
-      // Update Map
       _updateMap();
     });
   }
 
   Widget _buildDropdownItem(BuildContext context, int index, Prediction prediction) {
+    // Extract main and secondary text safely
+    final String mainText = prediction.structuredFormatting?.mainText ?? prediction.description ?? "";
+    final String secondaryText = prediction.structuredFormatting?.secondaryText ?? "";
+
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.1), spreadRadius: 1, blurRadius: 3)]),
+      decoration: BoxDecoration(
+        color: Colors.white, 
+        borderRadius: BorderRadius.circular(8), 
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey.withOpacity(0.1), 
+            spreadRadius: 1, 
+            blurRadius: 3
+          )
+        ]
+      ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         child: Row(
           children: [
-            Icon(Icons.location_on_outlined, color: Colors.grey.shade600, size: 16),
+            Icon(Icons.location_on_outlined, color: Colors.grey.shade600, size: 20),
             const SizedBox(width: 12),
-            Expanded(child: Text(prediction.structuredFormatting?.mainText ?? prediction.description ?? "", maxLines: 1, overflow: TextOverflow.ellipsis)),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Main Text (e.g., "Starbucks")
+                  Text(
+                    mainText, 
+                    maxLines: 1, 
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+                  ),
+                  // Secondary Text (e.g., "Main Street, Seattle, WA")
+                  if (secondaryText.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      secondaryText,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -249,9 +332,9 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
       ),
       body: Column(
         children: [
-          // ✅ HEADER MAP (Clickable to Expand)
+          // HEADER MAP
           SizedBox(
-            height: MediaQuery.of(context).size.height * 0.30, // 30% Height
+            height: MediaQuery.of(context).size.height * 0.30, 
             width: double.infinity,
             child: Stack(
               children: [
@@ -267,14 +350,12 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
                   tiltGesturesEnabled: false,
                   zoomGesturesEnabled: false,
                 ),
-                // Transparent layer to catch clicks
                 Positioned.fill(
                   child: GestureDetector(
                     onTap: _openFullScreenMap,
                     child: Container(color: Colors.transparent),
                   ),
                 ),
-                // Expand Icon
                 Positioned(
                   bottom: 10,
                   right: 10,
@@ -290,7 +371,7 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
             ),
           ),
 
-          // ✅ SCROLLABLE INPUTS
+          // INPUTS
           Expanded(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
@@ -305,22 +386,26 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
                     child: GooglePlaceAutoCompleteTextField(
                       textEditingController: _pickupController,
                       googleAPIKey: googleApiKey,
-                      inputDecoration: InputDecoration(
-                        prefixIcon: const Icon(Icons.my_location, color: Colors.green),
+                      inputDecoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.my_location, color: Colors.green),
                         hintText: 'Enter pick up',
                         border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                        contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 16),
                       ),
                       debounceTime: 600,
                       countries: const ["in"],
                       isLatLngRequired: true,
-                      getPlaceDetailWithLatLng: _onPickupSelected,
-                      itemClick: _onPickupSelected,
+                      getPlaceDetailWithLatLng: _onPickupLatLngFetched,
+                      itemClick: (Prediction prediction) {
+                        // ✅ FIXED: Keyboard Overlay Dismissal
+                        FocusScope.of(context).unfocus(); 
+                        _pickupController.text = prediction.description ?? '';
+                      },
                       itemBuilder: _buildDropdownItem,
                     ),
                   ),
                   
-                  // Current Location Button
+                  // Current Location
                   const SizedBox(height: 8),
                   InkWell(
                     onTap: _isFetchingLocation ? null : _getCurrentLocation,
@@ -341,17 +426,21 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
                     child: GooglePlaceAutoCompleteTextField(
                       textEditingController: _dropoffController,
                       googleAPIKey: googleApiKey,
-                      inputDecoration: InputDecoration(
-                        prefixIcon: const Icon(Icons.location_on, color: Colors.red),
+                      inputDecoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.location_on, color: Colors.red),
                         hintText: 'Enter drop off',
                         border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                        contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 16),
                       ),
                       debounceTime: 600,
                       countries: const ["in"],
                       isLatLngRequired: true,
-                      getPlaceDetailWithLatLng: _onDropoffSelected,
-                      itemClick: _onDropoffSelected,
+                      getPlaceDetailWithLatLng: _onDropoffLatLngFetched, 
+                      itemClick: (Prediction prediction) {
+                        // ✅ FIXED: Keyboard Overlay Dismissal
+                        FocusScope.of(context).unfocus(); 
+                        _dropoffController.text = prediction.description ?? '';
+                      },
                       itemBuilder: _buildDropdownItem,
                     ),
                   ),
@@ -368,15 +457,11 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
             child: SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: () {
-                  if (_pickupController.text.isNotEmpty && _dropoffController.text.isNotEmpty) {
-                    _navigateToUserSelection();
-                  } else {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter both pickup and drop-off locations')));
-                  }
-                },
+                onPressed: _isSubmitting ? null : _navigateToSenderDetails,
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.black, padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-                child: const Text('Submit', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white)),
+                child: _isSubmitting 
+                    ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                    : const Text('Submit', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white)),
               ),
             ),
           ),
@@ -386,7 +471,7 @@ class _LocationSelectionPageState extends State<LocationSelectionPage> {
   }
 }
 
-// ✅ NEW PAGE: Full Screen Interactive Map
+// Full Screen Interactive Map
 class FullScreenMapPage extends StatelessWidget {
   final Set<Marker> markers;
   final Set<Polyline> polylines;
@@ -412,7 +497,6 @@ class FullScreenMapPage extends StatelessWidget {
             myLocationEnabled: true,
             myLocationButtonEnabled: true,
             onMapCreated: (controller) {
-              // Auto-fit if markers exist
               if (markers.length > 1) {
                 Future.delayed(const Duration(milliseconds: 500), () {
                   List<double> lats = markers.map((m) => m.position.latitude).toList();
@@ -423,7 +507,7 @@ class FullScreenMapPage extends StatelessWidget {
                       southwest: LatLng(lats.first, lngs.first),
                       northeast: LatLng(lats.last, lngs.last),
                     ),
-                    50 // padding
+                    50 
                   ));
                 });
               }

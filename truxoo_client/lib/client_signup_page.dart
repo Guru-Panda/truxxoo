@@ -45,8 +45,8 @@ class CustomerRegistrationValidator {
   }
 
   static String? validateRegistrationNumber(String? value) {
-    if (value == null || value.isEmpty) return null;
-    if (value.length < 6) return 'Registration number must be at least 6 characters';
+    if (value == null || value.isEmpty) return 'Please enter registration number';
+    if (value.length < 3) return 'Invalid registration number';
     return null;
   }
 }
@@ -54,11 +54,13 @@ class CustomerRegistrationValidator {
 // ==================== REGISTRATION CHECK RESULT ====================
 class RegistrationCheckResult {
   final bool exists;
-  final String? userType; // 'client' or 'driver'
+  final bool hasError;
+  final String? userType; 
   final String? message;
 
   RegistrationCheckResult({
     required this.exists,
+    this.hasError = false,
     this.userType,
     this.message,
   });
@@ -87,12 +89,13 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
   final TextEditingController _companyNameController = TextEditingController();
   final TextEditingController _registrationNumberController = TextEditingController();
 
-  // Profile photo
+  // Images
   File? _profilePhoto;
+  File? _gstImage;
+  File? _panImage; 
 
   bool _isLoading = false;
 
-  // Database reference
   final FirebaseFirestore _db = FirebaseConfig.instance.db;
 
   @override
@@ -114,99 +117,45 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
   }
 
   // ==================== CHECK IF NUMBER EXISTS ====================
-  
-  /// Checks if phone number exists in clients or drivers collection
-  /// Returns specific message based on where it's found
   Future<RegistrationCheckResult> _checkPhoneNumberExists(String phoneNumber) async {
     try {
-      // Clean the phone number
-      final cleanPhone = phoneNumber.replaceAll(RegExp(r'[^\d]'), '');
-      final formattedPhone = '+91$cleanPhone';
+      final raw = phoneNumber.replaceAll(RegExp(r'[^\d]'), '');
+      final formattedPhone = '+91$raw';
+      final searchNums = [raw, formattedPhone];
 
-      print("🔍 Checking if phone exists: $formattedPhone");
-
-      // ===== Check in CLIENTS collection first =====
-      QuerySnapshot clientQuery = await _db
+      final clientQuery = await _db
           .collection('clients')
-          .where('phone_number', isEqualTo: formattedPhone)
+          .where('phone_number', whereIn: searchNums) 
           .limit(1)
           .get();
 
       if (clientQuery.docs.isNotEmpty) {
-        print("⚠️ Phone found in CLIENTS collection");
-        return RegistrationCheckResult(
-          exists: true,
-          userType: 'client',
-          message: 'Already registered.',
-        );
+        return RegistrationCheckResult(exists: true, userType: 'client', message: 'Already registered.');
       }
 
-      // Try alternate format for clients
-      clientQuery = await _db
-          .collection('clients')
-          .where('phone_number', isEqualTo: cleanPhone)
-          .limit(1)
-          .get();
-
-      if (clientQuery.docs.isNotEmpty) {
-        print("⚠️ Phone found in CLIENTS collection (alt format)");
-        return RegistrationCheckResult(
-          exists: true,
-          userType: 'client',
-          message: 'Already registered.',
-        );
-      }
-
-      // ===== Check in DRIVERS collection =====
-      QuerySnapshot driverQuery = await _db
+      final driverQuery = await _db
           .collection('drivers')
-          .where('phone_number', isEqualTo: formattedPhone)
+          .where('phone_number', whereIn: searchNums)
           .limit(1)
           .get();
 
       if (driverQuery.docs.isNotEmpty) {
-        print("⚠️ Phone found in DRIVERS collection");
-        return RegistrationCheckResult(
-          exists: true,
-          userType: 'driver',
-          message: 'Number already registered as a driver.',
-        );
+        return RegistrationCheckResult(exists: true, userType: 'driver', message: 'Number already registered as a driver.');
       }
 
-      // Try alternate format for drivers
-      driverQuery = await _db
-          .collection('drivers')
-          .where('phone_number', isEqualTo: cleanPhone)
-          .limit(1)
-          .get();
-
-      if (driverQuery.docs.isNotEmpty) {
-        print("⚠️ Phone found in DRIVERS collection (alt format)");
-        return RegistrationCheckResult(
-          exists: true,
-          userType: 'driver',
-          message: 'Number already registered as a driver.',
-        );
-      }
-
-      // Phone number not found in any collection
-      print("✅ Phone number is available for registration");
-      return RegistrationCheckResult(
-        exists: false,
-        message: null,
-      );
+      return RegistrationCheckResult(exists: false, message: null);
 
     } catch (e) {
-      print("❌ Error checking phone: $e");
-      // Return false to allow registration attempt (will fail at Firebase if duplicate)
       return RegistrationCheckResult(
-        exists: false,
-        message: null,
+        exists: false, 
+        hasError: true, 
+        message: 'Network error. Unable to verify phone number. Please check your connection.'
       );
     }
   }
 
-  Future<void> _pickProfileImage() async {
+  // ==================== IMAGE PICKER LOGIC ====================
+  Future<void> _pickImage(Function(File) onSelected) async {
     try {
       final source = await showModalBottomSheet<ImageSource>(
         context: context,
@@ -232,70 +181,79 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
 
       final XFile? image = await _picker.pickImage(
         source: source,
-        maxWidth: 800.0,
+        maxWidth: 800.0, 
         maxHeight: 800.0,
         imageQuality: 80,
       );
 
       if (image != null) {
         setState(() {
-          _profilePhoto = File(image.path);
+          onSelected(File(image.path));
         });
         HapticFeedback.lightImpact();
       }
     } catch (e) {
-      if (mounted) {
-        _showErrorSnackBar('Error picking image: $e');
-      }
+      if (mounted) _showErrorSnackBar('Error picking image: $e');
     }
   }
 
-  Widget _buildProfileImageSection() {
+  // ==================== REUSABLE IMAGE WIDGET ====================
+  // MODIFIED: Added isRequired flag (defaults to true)
+  Widget _buildImagePickerWidget({
+    required String label, 
+    required File? imageFile, 
+    required VoidCallback onTap,
+    String? subLabel,
+    bool isRequired = true,
+  }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         RichText(
-          text: const TextSpan(
+          text: TextSpan(
             children: [
               TextSpan(
-                text: 'Profile Photo',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.black,
+                text: label,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: Colors.black),
+              ),
+              // MODIFIED: Conditionally show the asterisk
+              if (isRequired)
+                const TextSpan(
+                  text: ' *',
+                  style: TextStyle(color: Colors.red, fontSize: 16),
                 ),
-              ),
-              TextSpan(
-                text: ' *',
-                style: TextStyle(color: Colors.red, fontSize: 16),
-              ),
             ],
           ),
         ),
+        if (subLabel != null) ...[
+          const SizedBox(height: 4),
+          Text(subLabel, style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+        ],
         const SizedBox(height: 8),
         GestureDetector(
-          onTap: _pickProfileImage,
+          onTap: onTap,
           child: Container(
             height: CustomerRegistrationConstants.imagePickerHeight,
             width: double.infinity,
             decoration: BoxDecoration(
               border: Border.all(
-                color: _profilePhoto != null ? Colors.green : Colors.grey,
-                width: _profilePhoto != null ? 2 : 1,
+                color: imageFile != null ? Colors.green : Colors.grey,
+                width: imageFile != null ? 2 : 1,
               ),
               borderRadius: BorderRadius.circular(8),
               color: Colors.grey[50],
             ),
-            child: _profilePhoto != null
+            child: imageFile != null
                 ? Stack(
                     children: [
                       ClipRRect(
                         borderRadius: BorderRadius.circular(8),
                         child: Image.file(
-                          _profilePhoto!,
+                          imageFile,
                           fit: BoxFit.cover,
                           width: double.infinity,
                           height: double.infinity,
+                          cacheWidth: 400, 
                         ),
                       ),
                       Positioned(
@@ -320,13 +278,13 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(
-                        Icons.person_add_outlined,
-                        size: 40,
+                        Icons.add_a_photo_outlined,
+                        size: 30,
                         color: Colors.grey[400],
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Tap to upload your photo\n(Required for verification)',
+                        'Tap to upload',
                         style: TextStyle(
                           color: Colors.grey[600],
                           fontSize: 12,
@@ -341,17 +299,22 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
     );
   }
 
-  // ==================== SUBMIT REGISTRATION ====================
+  // ==================== SUBMIT FORM ====================
   Future<void> _submitRegistrationForm() async {
-    // Validate form
+    // 1. Validate Text Fields
     if (!_formKey.currentState!.validate()) {
       _showErrorSnackBar('Please fill all required fields correctly');
       return;
     }
 
-    // Check profile photo
+    // 2. Validate Images
     if (_profilePhoto == null) {
       _showErrorSnackBar('Please upload your profile photo');
+      return;
+    }
+    // MODIFIED: Removed GST image validation logic here
+    if (_panImage == null) {
+      _showErrorSnackBar('Please upload PAN Card for KYC');
       return;
     }
 
@@ -359,25 +322,25 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
     setState(() => _isLoading = true);
 
     try {
-      // 1. Check if phone number already exists
+      // 3. Check Phone Duplicate
       final checkResult = await _checkPhoneNumberExists(_mobileController.text);
 
-      if (checkResult.exists) {
+      if (checkResult.hasError) {
         setState(() => _isLoading = false);
-        
-        // Show specific error message based on user type
-        if (checkResult.userType == 'driver') {
-          _showErrorSnackBar('Number already registered as a driver.');
-        } else {
-          _showErrorSnackBar('Already registered.');
-        }
+        _showErrorSnackBar(checkResult.message ?? 'Network error.');
         return;
       }
 
-      // 2. Show progress dialog
+      if (checkResult.exists) {
+        setState(() => _isLoading = false);
+        _showErrorSnackBar(checkResult.message ?? 'Already registered.');
+        return;
+      }
+
+      // 4. Show Loading
       _showProgressDialog();
 
-      // 3. Create Data Object
+      // 5. Prepare Data
       final registrationData = ClientRegistrationData(
         name: _nameController.text.trim(),
         phoneNumber: _mobileController.text.trim(),
@@ -385,24 +348,25 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
         companyName: _companyNameController.text.trim(),
         companyRegNumber: _registrationNumberController.text.trim(),
         profilePhoto: _profilePhoto!,
+        gstImage: _gstImage, // MODIFIED: Removed the ! so nulls are accepted
+        panImage: _panImage!,
       );
 
-      // 4. Call Service to register
+      // 6. Call Service
       final result = await ClientDataService.registerClient(data: registrationData);
 
-      // 5. Close progress dialog
+      // 7. Dismiss Loading
       if (mounted) Navigator.of(context).pop();
 
-      // 6. Handle Result
+      // 8. Handle Result
       if (result.success) {
         setState(() => _isLoading = false);
         HapticFeedback.mediumImpact();
-        _showSuccessSnackBar('Registration successful!');
+        _showSuccessSnackBar('Registration successful! KYC Pending.');
 
         await Future.delayed(const Duration(milliseconds: 500));
 
         if (mounted) {
-          // Navigate to Client Home
           Navigator.pushAndRemoveUntil(
             context,
             MaterialPageRoute(
@@ -424,9 +388,7 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
         _showErrorSnackBar(result.message ?? 'Registration failed');
       }
     } catch (e) {
-      // Close dialog if open
       if (mounted && Navigator.canPop(context)) Navigator.of(context).pop();
-      
       if (mounted) {
         setState(() => _isLoading = false);
         _showErrorSnackBar('Error: $e');
@@ -434,6 +396,7 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
     }
   }
 
+  // ==================== UI HELPERS ====================
   void _showProgressDialog() {
     showDialog(
       context: context,
@@ -444,10 +407,10 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
           children: [
             const CircularProgressIndicator(),
             const SizedBox(height: 16),
-            const Text('Creating your account...'),
+            const Text('Creating account...'),
             const SizedBox(height: 8),
             Text(
-              'Uploading photo & saving details',
+              'Uploading KYC documents may take a moment',
               style: TextStyle(color: Colors.grey[600], fontSize: 12),
               textAlign: TextAlign.center,
             ),
@@ -465,7 +428,6 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
         backgroundColor: Colors.red,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        duration: const Duration(seconds: 3),
       ),
     );
   }
@@ -504,7 +466,6 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Phone Verified Banner
               if (widget.phoneNumber != null)
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -528,18 +489,23 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
                   ),
                 ),
 
-              // Profile Information Section
+              // ================= SECTION 1: PROFILE =================
               _buildSectionHeader('Profile Information'),
               const SizedBox(height: CustomerRegistrationConstants.verticalSpacing),
 
-              _buildProfileImageSection(),
+              _buildImagePickerWidget(
+                label: 'Profile Photo',
+                subLabel: '(For your avatar)',
+                imageFile: _profilePhoto,
+                onTap: () => _pickImage((f) => _profilePhoto = f),
+              ),
+              
               const SizedBox(height: CustomerRegistrationConstants.verticalSpacing),
 
               TextFormField(
                 controller: _nameController,
                 decoration: _buildInputDecoration('Full Name *'),
                 validator: CustomerRegistrationValidator.validateName,
-                textInputAction: TextInputAction.next,
                 textCapitalization: TextCapitalization.words,
               ),
               const SizedBox(height: CustomerRegistrationConstants.verticalSpacing),
@@ -554,7 +520,6 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
                   _MobileNumberFormatter(),
                 ],
                 validator: CustomerRegistrationValidator.validateMobile,
-                textInputAction: TextInputAction.next,
               ),
               const SizedBox(height: CustomerRegistrationConstants.verticalSpacing),
 
@@ -563,11 +528,10 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
                 decoration: _buildInputDecoration('Email Address *'),
                 keyboardType: TextInputType.emailAddress,
                 validator: CustomerRegistrationValidator.validateEmail,
-                textInputAction: TextInputAction.next,
               ),
               const SizedBox(height: CustomerRegistrationConstants.sectionSpacing),
 
-              // Company Information Section
+              // ================= SECTION 2: COMPANY =================
               _buildSectionHeader('Company Information'),
               const SizedBox(height: CustomerRegistrationConstants.verticalSpacing),
 
@@ -575,19 +539,50 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
                 controller: _companyNameController,
                 decoration: _buildInputDecoration('Company Name *'),
                 validator: CustomerRegistrationValidator.validateCompanyName,
-                textInputAction: TextInputAction.next,
                 textCapitalization: TextCapitalization.words,
               ),
               const SizedBox(height: CustomerRegistrationConstants.verticalSpacing),
 
               TextFormField(
                 controller: _registrationNumberController,
-                decoration: _buildInputDecoration('Registration Number (Optional)'),
+                decoration: _buildInputDecoration('Registration Number *'),
                 validator: CustomerRegistrationValidator.validateRegistrationNumber,
-                textInputAction: TextInputAction.done,
                 textCapitalization: TextCapitalization.characters,
               ),
               const SizedBox(height: CustomerRegistrationConstants.sectionSpacing),
+
+              // ================= SECTION 3: KYC =================
+              _buildSectionHeader('KYC Verification'),
+              const SizedBox(height: 8),
+              Text(
+                'Please upload clear photos of the following documents.',
+                style: TextStyle(color: Colors.grey[600], fontSize: 13),
+              ),
+              const SizedBox(height: CustomerRegistrationConstants.verticalSpacing),
+
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildImagePickerWidget(
+                      label: 'GST Document',
+                      subLabel: '(Optional)',
+                      isRequired: false, // MODIFIED: Sets asterisk rendering to false
+                      imageFile: _gstImage,
+                      onTap: () => _pickImage((f) => _gstImage = f),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _buildImagePickerWidget(
+                      label: 'PAN Card',
+                      imageFile: _panImage,
+                      onTap: () => _pickImage((f) => _panImage = f),
+                    ),
+                  ),
+                ],
+              ),
+              
+              const SizedBox(height: 32),
 
               // Submit Button
               SizedBox(
@@ -599,6 +594,7 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
                     backgroundColor: Colors.black,
                     foregroundColor: Colors.white,
                     disabledBackgroundColor: Colors.grey[300],
+                    disabledForegroundColor: Colors.grey[500],
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
@@ -636,7 +632,7 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
     );
   }
 
-  InputDecoration _buildInputDecoration(String label, {IconData? suffixIcon}) {
+  InputDecoration _buildInputDecoration(String label) {
     return InputDecoration(
       labelText: label,
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
@@ -648,12 +644,7 @@ class _CustomerRegistrationPageState extends State<CustomerRegistrationPage> {
         borderRadius: BorderRadius.circular(8),
         borderSide: const BorderSide(color: Colors.black, width: 2),
       ),
-      disabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: BorderSide(color: Colors.grey[200]!),
-      ),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      suffixIcon: suffixIcon != null ? Icon(suffixIcon) : null,
       filled: true,
       fillColor: Colors.grey[50],
     );

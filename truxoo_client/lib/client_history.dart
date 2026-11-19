@@ -5,6 +5,10 @@ import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import 'package:back_button_interceptor/back_button_interceptor.dart';
 import 'client_side_home.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:intl/intl.dart'; 
 
 class ShipmentHistory {
   final String orderId;
@@ -13,7 +17,7 @@ class ShipmentHistory {
   final String destination;
   final String truckType;
   final String status;
-  final double amount;
+  final String amount;
 
   ShipmentHistory({
     required this.orderId,
@@ -24,10 +28,37 @@ class ShipmentHistory {
     required this.status,
     required this.amount,
   });
+
+  // ✅ FIXED: Safe type-checking for Timestamps
+  factory ShipmentHistory.fromFirestore(Map<String, dynamic> data) {
+    String formattedDate = "N/A";
+    if (data['createdAt'] != null && data['createdAt'] is Timestamp) {
+      DateTime dateTime = (data['createdAt'] as Timestamp).toDate();
+      formattedDate = DateFormat('dd MMM yyyy').format(dateTime);
+    } else if (data['date'] != null) {
+      formattedDate = data['date'];
+    }
+
+    String displayAmount = "0";
+    if (data['finalFare'] != null && (data['finalFare'] is num) && data['finalFare'] > 0) {
+      displayAmount = "₹${data['finalFare']}";
+    } else if (data['estimatedFare'] != null) {
+      displayAmount = "₹${data['estimatedFare']}";
+    }
+
+    return ShipmentHistory(
+      orderId: data['trackingId'] ?? 'Unknown',
+      date: formattedDate,
+      source: data['pickupAddress'] ?? data['pickupLocation'] ?? 'N/A',
+      destination: data['dropAddress'] ?? data['dropLocation'] ?? 'N/A',
+      truckType: data['vehicleType'] ?? data['truckType'] ?? 'Truck',
+      status: data['status'] ?? 'Pending',
+      amount: displayAmount,
+    );
+  }
 }
 
 class ClientHistory extends StatefulWidget {
-  // Add these parameters to preserve profile data
   final String? displayName;
   final String? displayProfilePicture;
   final bool isUsingLocalImage;
@@ -46,35 +77,10 @@ class ClientHistory extends StatefulWidget {
 class _ClientHistoryState extends State<ClientHistory> {
   final WidgetsToImageController controller = WidgetsToImageController();
 
-  final List<ShipmentHistory> _shipments = [
-    ShipmentHistory(
-      orderId: 'ORD001',
-      date: '25 Jun 2024',
-      source: 'Bhubaneswar',
-      destination: 'Rourkela',
-      truckType: 'Open Truck',
-      status: 'Completed',
-      amount: 5000.00,
-    ),
-    ShipmentHistory(
-      orderId: 'ORD002',
-      date: '22 Jun 2024',
-      source: 'Cuttack',
-      destination: 'Sambalpur',
-      truckType: 'Container',
-      status: 'In Transit',
-      amount: 8000.00,
-    ),
-    ShipmentHistory(
-      orderId: 'ORD003',
-      date: '20 Jun 2024',
-      source: 'Puri',
-      destination: 'Berhampur',
-      truckType: 'MCV',
-      status: 'Cancelled',
-      amount: 6500.00,
-    ),
-  ];
+  FirebaseFirestore get _firestore => FirebaseFirestore.instanceFor(
+    app: Firebase.app(),
+    databaseId: 'truxoodriver',
+  );
 
   @override
   void initState() {
@@ -88,26 +94,21 @@ class _ClientHistoryState extends State<ClientHistory> {
     super.dispose();
   }
 
-  // Updated back button interceptor
   bool _backButtonInterceptor(bool stopDefaultButtonEvent, RouteInfo info) {
-    // Check if there's a dialog or bottom sheet open
     if (Navigator.of(context).canPop() && ModalRoute.of(context)?.isCurrent != true) {
-      return false; // Let the default behavior close the dialog/bottom sheet
+      return false;
     }
-
-    // Navigate to home with profile data
     _navigateToHome();
     return true;
   }
 
-  // Updated navigation method to preserve profile data
   void _navigateToHome() {
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
         builder: (context) => ClientSideHome(
-          displayName: widget.displayName ?? 'Guru Prasad Panda',
-          displayProfilePicture: widget.displayProfilePicture ?? 'assets/client_image.webp',
+          displayName: widget.displayName ?? 'Guest',
+          displayProfilePicture: widget.displayProfilePicture ?? 'assets/client_imag_high.jpg',
           isUsingLocalImage: widget.isUsingLocalImage,
         ),
       ),
@@ -116,23 +117,25 @@ class _ClientHistoryState extends State<ClientHistory> {
 
   Color _getStatusColor(String status) {
     switch (status.toLowerCase()) {
-      case 'completed':
-        return Colors.green;
-      case 'in transit':
-        return Colors.blue;
-      case 'cancelled':
-        return Colors.red;
-      default:
-        return Colors.grey;
+      case 'completed': return Colors.green;
+      case 'in_transit':
+      case 'accepted': return Colors.blue;
+      case 'cancelled': return Colors.red;
+      case 'pending': return Colors.orange;
+      default: return Colors.grey;
     }
+  }
+
+  String _formatStatus(String status) {
+    return status.replaceAll('_', ' ').split(' ').map((str) => 
+      str.isNotEmpty ? '${str[0].toUpperCase()}${str.substring(1)}' : ''
+    ).join(' ');
   }
 
   void _showOptions(BuildContext context, ShipmentHistory shipment) {
     showModalBottomSheet(
       context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (context) => Container(
         padding: const EdgeInsets.symmetric(vertical: 20),
         child: Column(
@@ -141,18 +144,12 @@ class _ClientHistoryState extends State<ClientHistory> {
             ListTile(
               leading: const Icon(Icons.receipt_long, color: Colors.blue),
               title: const Text('Get Receipt'),
-              onTap: () {
-                Navigator.pop(context);
-                _getReceipt(shipment);
-              },
+              onTap: () { Navigator.pop(context); _getReceipt(shipment); },
             ),
             ListTile(
               leading: const Icon(Icons.share, color: Colors.green),
-              title: const Text('Share'),
-              onTap: () {
-                Navigator.pop(context);
-                _shareShipment(shipment);
-              },
+              title: const Text('Share Shipment'),
+              onTap: () { Navigator.pop(context); _shareShipment(shipment); },
             ),
           ],
         ),
@@ -160,199 +157,9 @@ class _ClientHistoryState extends State<ClientHistory> {
     );
   }
 
-  Widget _buildReceiptWidget(ShipmentHistory shipment) {
-    return Container(
-      width: 400,
-      color: Colors.white,
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Stack(
-            children: [
-              Positioned.fill(
-                child: Center(
-                  child: Transform.rotate(
-                    angle: -0.5,
-                    child: Text(
-                      'TRUXOO',
-                      style: TextStyle(
-                        fontSize: 80,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey.withOpacity(0.1),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Order #${shipment.orderId}',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 18,
-                          color: Colors.black,
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: _getStatusColor(shipment.status).withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          shipment.status,
-                          style: TextStyle(
-                            color: _getStatusColor(shipment.status),
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      const Icon(Icons.calendar_today, size: 16, color: Colors.black54),
-                      const SizedBox(width: 8),
-                      Text(
-                        shipment.date,
-                        style: const TextStyle(fontSize: 14, color: Colors.black54),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(15),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.withOpacity(0.2)),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Shipment Details', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.black)),
-                        const SizedBox(height: 15),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text('From', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                                  Text(shipment.source, style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.black)),
-                                ],
-                              ),
-                            ),
-                            const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 10),
-                              child: Icon(Icons.arrow_forward, color: Colors.grey),
-                            ),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  const Text('To', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                                  Text(shipment.destination, style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.black)),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Container(
-                    padding: const EdgeInsets.all(15),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.withOpacity(0.2)),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('Truck Type', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                            Text(shipment.truckType, style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.black)),
-                          ],
-                        ),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            const Text('Amount', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                            Text('₹${shipment.amount.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.black)),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 30),
-                  Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                      decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(8)),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('TRUXOO', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-                          SizedBox(width: 8),
-                          Icon(Icons.local_shipping, color: Colors.white, size: 20),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-  
-  Future<void> _getReceipt(ShipmentHistory shipment) async {
-    try {
-      await _showReceiptDialog(shipment, isForSharing: false);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to generate receipt: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _shareShipment(ShipmentHistory shipment) async {
-    try {
-      await _showReceiptDialog(shipment, isForSharing: true);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to share shipment: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
+  // ✅ FIXED: Better Async flow for Sharing (Pop dialog before share sheet)
   Future<void> _showReceiptDialog(ShipmentHistory shipment, {required bool isForSharing}) async {
     final WidgetsToImageController dialogController = WidgetsToImageController();
-    
     await showDialog(
       context: context,
       barrierDismissible: false,
@@ -379,37 +186,22 @@ class _ClientHistoryState extends State<ClientHistory> {
                           final imageFile = File(imagePath);
                           await imageFile.writeAsBytes(bytes);
 
-                          if (isForSharing) {
-                            await Share.shareXFiles(
-                              [XFile(imagePath)],
-                              text: 'Shipment Details #${shipment.orderId}',
-                            );
-                          }
+                          if (mounted) Navigator.pop(context); // Pop first!
 
-                          if (mounted) {
-                            Navigator.pop(context);
+                          if (isForSharing) {
+                            await Share.shareXFiles([XFile(imagePath)], text: 'Shipment Details #${shipment.orderId}');
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Receipt saved to device'), backgroundColor: Colors.green));
                           }
                         }
                       } catch (e) {
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Failed to ${isForSharing ? 'share' : 'save'}: $e'),
-                              backgroundColor: Colors.red,
-                            ),
-                          );
-                        }
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
                       }
                     },
                     icon: Icon(isForSharing ? Icons.share : Icons.download),
                     label: Text(isForSharing ? 'Share' : 'Save'),
                   ),
-                  OutlinedButton(
-                    onPressed: () {
-                      Navigator.pop(context);
-                    },
-                    child: const Text('Close'),
-                  ),
+                  OutlinedButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
                 ],
               ),
             ),
@@ -419,211 +211,162 @@ class _ClientHistoryState extends State<ClientHistory> {
     );
   }
 
+  // Helper methods for UI
+  Future<void> _getReceipt(ShipmentHistory shipment) async => await _showReceiptDialog(shipment, isForSharing: false);
+  Future<void> _shareShipment(ShipmentHistory shipment) async => await _showReceiptDialog(shipment, isForSharing: true);
+
   @override
   Widget build(BuildContext context) {
+    final User? user = FirebaseAuth.instance.currentUser;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Shipment History',
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: _navigateToHome, // Updated to use _navigateToHome
-        ),
+        title: const Text('Shipment History', style: TextStyle(fontWeight: FontWeight.bold)),
+        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: _navigateToHome),
       ),
-      body: _shipments.isEmpty
-          ? const Center(
-              child: Text(
-                'No shipment history available',
-                style: TextStyle(
-                  fontSize: 16,
-                  color: Colors.grey,
-                ),
-              ),
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: _shipments.length,
-              itemBuilder: (context, index) {
-                final shipment = _shipments[index];
-                return InkWell(
-                  onTap: () => _showOptions(context, shipment),
-                  child: Card(
+      body: user == null 
+        ? const Center(child: Text("Please log in to view history"))
+        : StreamBuilder<QuerySnapshot>(
+            // ✅ FIXED: Added .limit(50) for performance
+            stream: _firestore
+                .collection('booking_requests')
+                .where('clientId', isEqualTo: user.uid)
+                .orderBy('createdAt', descending: true)
+                .limit(50)
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+              if (snapshot.hasError) return Center(child: Text("Error: ${snapshot.error}"));
+              if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                return const Center(child: Text('No shipment history available', style: TextStyle(color: Colors.grey)));
+              }
+
+              final shipments = snapshot.data!.docs.map((doc) => ShipmentHistory.fromFirestore(doc.data() as Map<String, dynamic>)).toList();
+
+              return ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: shipments.length,
+                itemBuilder: (context, index) {
+                  final shipment = shipments[index];
+                  return Card(
                     elevation: 2,
                     margin: const EdgeInsets.only(bottom: 16),
-                    shape: RoundedRectangleBorder(
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    child: InkWell(
+                      onTap: () => _showOptions(context, shipment),
                       borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Stack(
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text(
-                                    'Order #${shipment.orderId}',
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 4,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: _getStatusColor(shipment.status)
-                                          .withOpacity(0.1),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Text(
-                                      shipment.status,
-                                      style: TextStyle(
-                                        color: _getStatusColor(shipment.status),
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              Row(
-                                children: [
-                                  const Icon(
-                                    Icons.calendar_today,
-                                    size: 16,
-                                    color: Colors.grey,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    shipment.date,
-                                    style: const TextStyle(
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        const Text(
-                                          'From',
-                                          style: TextStyle(
-                                            color: Colors.grey,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                        Text(
-                                          shipment.source,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const Icon(
-                                    Icons.arrow_forward,
-                                    color: Colors.grey,
-                                  ),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.end,
-                                      children: [
-                                        const Text(
-                                          'To',
-                                          style: TextStyle(
-                                            color: Colors.grey,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                        Text(
-                                          shipment.destination,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              const Divider(),
-                              const SizedBox(height: 12),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      const Text(
-                                        'Truck Type',
-                                        style: TextStyle(
-                                          color: Colors.grey,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                      Text(
-                                        shipment.truckType,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      const Text(
-                                        'Amount',
-                                        style: TextStyle(
-                                          color: Colors.grey,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                      Text(
-                                        '₹${shipment.amount.toStringAsFixed(2)}',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 16,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Expanded(child: Text('Order #${shipment.orderId}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16), overflow: TextOverflow.ellipsis)),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(color: _getStatusColor(shipment.status).withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                                  child: Text(_formatStatus(shipment.status), style: TextStyle(color: _getStatusColor(shipment.status), fontWeight: FontWeight.bold, fontSize: 12)),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                const Icon(Icons.calendar_today, size: 14, color: Colors.grey),
+                                const SizedBox(width: 6),
+                                Text(shipment.date, style: const TextStyle(color: Colors.grey, fontSize: 13)),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            _buildRouteRow(shipment),
+                            const Divider(),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(shipment.truckType, style: const TextStyle(fontWeight: FontWeight.w500)),
+                                Text(shipment.amount, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                              ],
+                            ),
+                          ],
                         ),
-                        Positioned(
-                          right: 8,
-                          bottom: 8,
-                          child: Icon(
-                            Icons.more_vert,
-                            color: Colors.grey[400],
-                            size: 20,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
-                );
-              },
-            ),
+                  );
+                },
+              );
+            },
+          ),
+    );
+  }
+
+  Widget _buildRouteRow(ShipmentHistory shipment) {
+    return Row(
+      children: [
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('From', style: TextStyle(color: Colors.grey, fontSize: 10)),
+          Text(shipment.source, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+        ])),
+        const Icon(Icons.arrow_forward, size: 16, color: Colors.grey),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+          const Text('To', style: TextStyle(color: Colors.grey, fontSize: 10)),
+          Text(shipment.destination, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13), textAlign: TextAlign.end),
+        ])),
+      ],
+    );
+  }
+
+  // --- Receipt UI Builder (Unchanged) ---
+  Widget _buildReceiptWidget(ShipmentHistory shipment) {
+     return Container(
+      width: 350,
+      color: Colors.white,
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('RECEIPT', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, letterSpacing: 2)),
+              Icon(Icons.local_shipping, color: _getStatusColor(shipment.status), size: 30),
+            ],
+          ),
+          const Divider(thickness: 2, color: Colors.black),
+          const SizedBox(height: 16),
+          Text('Order ID: ${shipment.orderId}', style: const TextStyle(fontWeight: FontWeight.bold)),
+          Text('Date: ${shipment.date}'),
+          const SizedBox(height: 20),
+          _buildReceiptRow('Source', shipment.source),
+          _buildReceiptRow('Destination', shipment.destination),
+          _buildReceiptRow('Vehicle', shipment.truckType),
+          const Divider(),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('TOTAL AMOUNT', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(shipment.amount, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            ],
+          ),
+          const SizedBox(height: 24),
+          const Center(child: Text('Thank you for using Unload!', style: TextStyle(fontStyle: FontStyle.italic, color: Colors.grey))),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReceiptRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 80, child: Text(label, style: const TextStyle(color: Colors.grey))),
+          Expanded(child: Text(value, style: const TextStyle(fontWeight: FontWeight.w500))),
+        ],
+      ),
     );
   }
 }

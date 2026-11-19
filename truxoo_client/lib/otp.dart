@@ -1,12 +1,13 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:geocoding/geocoding.dart';
 import 'package:back_button_interceptor/back_button_interceptor.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+// INTERNAL IMPORTS
+import 'services/chat_screen.dart'; // ✅ Just importing the screen now
 
 class OTPPage extends StatefulWidget {
   final String bookingId;
@@ -26,62 +27,53 @@ class _OTPPageState extends State<OTPPage> {
   // --- LOGIC STATE VARIABLES ---
   String _pin = "....";
   bool _isLoading = true;
+  String _status = 'pending'; 
   
+  // Stream Subscription to listen for database changes
+  StreamSubscription<DocumentSnapshot>? _bookingSubscription;
+
   // Data fetched from Firestore
+  Map<String, dynamic>? _bookingData; 
   String? _driverName;
   String? _driverPhone;
   String? _truckNumber;
   String? _driverPhoto;
   String? _vehicleModel;
+  
   String _pickupLocation = "Loading location...";
   String _dropoffLocation = "Loading location...";
+  
+  double? _pickupLat;
+  double? _pickupLng;
+  double? _dropoffLat;
+  double? _dropoffLng;
+
   String _amount = "Calculating...";
   String _receiverName = "Receiver";
   String _receiverPhone = "";
 
-  // --- UI STATE VARIABLES ---
-  final TextEditingController _messageController = TextEditingController();
-
   @override
   void initState() {
     super.initState();
-    
-    // Start Logic
-    _generateAndSavePIN();
-    _fetchBookingDetails();
-    
-    // Add back button interceptor
+    _listenToBookingDetails(); 
     BackButtonInterceptor.add(_backButtonInterceptor);
   }
 
   @override
   void dispose() {
     BackButtonInterceptor.remove(_backButtonInterceptor);
-    _messageController.dispose();
+    // Cancel the listener to prevent memory leaks when switching between rides
+    _bookingSubscription?.cancel();
     super.dispose();
   }
 
-  // --- LOGIC FUNCTIONS ---
-
-  // 1. Handle Hardware Back Button
+  // Handle Hardware Back Button -> Go to Home
   bool _backButtonInterceptor(bool stopDefaultButtonEvent, RouteInfo info) {
-    if (Navigator.of(context).canPop() && ModalRoute.of(context)?.isCurrent != true) {
-      return false; 
-    }
+    Navigator.of(context).popUntil((route) => route.isFirst);
     return true; 
   }
 
-  // 2. Generate Random 4-digit PIN and save to Firestore
-  Future<void> _generateAndSavePIN() async {
-    var rng = Random();
-    String newPin = (1000 + rng.nextInt(9000)).toString();
-
-    if (mounted) {
-      setState(() {
-        _pin = newPin;
-      });
-    }
-
+  void _listenToBookingDetails() {
     try {
       FirebaseFirestore db;
       try {
@@ -90,32 +82,31 @@ class _OTPPageState extends State<OTPPage> {
         db = FirebaseFirestore.instance;
       }
 
-      await db.collection('booking_requests').doc(widget.bookingId).update({
-        'otp': newPin,
-        'status': 'otp_pending', 
-      });
+      _bookingSubscription = db
+          .collection('booking_requests')
+          .doc(widget.bookingId)
+          .snapshots()
+          .listen((DocumentSnapshot doc) {
+        
+        if (doc.exists && mounted) {
+          Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+          
+          String currentStatus = data['status'] ?? 'pending';
+          if (currentStatus == 'completed' || currentStatus == 'cancelled' || currentStatus == 'denied') {
+             ScaffoldMessenger.of(context).showSnackBar(
+               SnackBar(content: Text("This ride is now $currentStatus."), backgroundColor: Colors.blueGrey)
+             );
+             Navigator.of(context).popUntil((route) => route.isFirst);
+             return; 
+          }
 
-    } catch (e) {
-      debugPrint("Error saving PIN: $e");
-    }
-  }
-
-  // 3. Fetch Booking & Driver Details from Firestore
-  Future<void> _fetchBookingDetails() async {
-    try {
-      FirebaseFirestore db;
-      try {
-        db = FirebaseFirestore.instanceFor(app: Firebase.app(), databaseId: 'truxoodriver');
-      } catch (e) {
-        db = FirebaseFirestore.instance;
-      }
-
-      DocumentSnapshot doc = await db.collection('booking_requests').doc(widget.bookingId).get();
-      
-      if (doc.exists) {
-        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-        if (mounted) {
           setState(() {
+            _bookingData = data; 
+            _status = currentStatus;
+            
+            // Extract OTP
+            _pin = data['otp'] ?? "...."; 
+            
             // Driver Details
             _driverName = data['driverName'] ?? "Driver Assigning...";
             _driverPhone = data['driverPhone'];
@@ -123,27 +114,50 @@ class _OTPPageState extends State<OTPPage> {
             _driverPhoto = data['driverPhoto'];
             _vehicleModel = data['vehicleType'] ?? "Truck";
             
-            // Trip Details
+            // Location Text
             _pickupLocation = data['pickupAddress'] ?? "Pickup Location";
-            _dropoffLocation = data['dropoffAddress'] ?? "Dropoff Location";
-            _amount = "₹ ${data['totalAmount'] ?? '0'}";
+            _dropoffLocation = data['dropAddress'] ?? "Dropoff Location"; 
+            
+            // Extract Exact Coordinates
+            _pickupLat = data['pickupLat'];
+            _pickupLng = data['pickupLng'];
+            _dropoffLat = data['dropLat'];
+            _dropoffLng = data['dropLng'];
+            
+            // Pricing
+            if (data['finalPrice'] != null) {
+              _amount = "₹ ${data['finalPrice']}";
+            } else {
+              _amount = "₹ ${data['estimatedFare'] ?? '0'} (Est)";
+            }
+            
+            // Receiver
             _receiverName = data['receiverName'] ?? "Receiver";
             _receiverPhone = data['receiverPhone'] ?? "";
             
             _isLoading = false;
           });
         }
-      }
+      }, onError: (e) {
+        debugPrint("Error listening to details: $e");
+        if(mounted) setState(() => _isLoading = false);
+      });
+
     } catch (e) {
-      debugPrint("Error fetching details: $e");
-      if(mounted) setState(() => _isLoading = false);
+      debugPrint("Error setting up stream: $e");
     }
   }
 
-  // 4. Call Driver
   void _callDriver() async {
-    if (_driverPhone != null && _driverPhone!.isNotEmpty) {
-      final Uri launchUri = Uri(scheme: 'tel', path: _driverPhone);
+    String? phoneToCall = _driverPhone;
+
+    // Route the phone call to the Fleet Owner if it's an agency ride
+    if (_bookingData != null && _bookingData!['assignedByOwner'] != null && _bookingData!['owner_ph'] != null) {
+      phoneToCall = _bookingData!['owner_ph'];
+    }
+
+    if (phoneToCall != null && phoneToCall.isNotEmpty) {
+      final Uri launchUri = Uri(scheme: 'tel', path: phoneToCall);
       if (await canLaunchUrl(launchUri)) {
         await launchUrl(launchUri);
       } else {
@@ -155,17 +169,9 @@ class _OTPPageState extends State<OTPPage> {
       }
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Driver phone number not available"))
+        const SnackBar(content: Text("Phone number not available"))
       );
     }
-  }
-
-  void _sendMessage() {
-    if (_messageController.text.isEmpty) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Message logic not implemented yet. Sent: ${_messageController.text}')),
-    );
-    _messageController.clear();
   }
 
   void _showOptionsMenu() {
@@ -185,11 +191,21 @@ class _OTPPageState extends State<OTPPage> {
             ),
             const SizedBox(height: 20),
             ListTile(
-              leading: const Icon(Icons.cancel, color: Colors.red),
-              title: const Text('Cancel Trip'),
+              leading: Icon(Icons.cancel, color: _status == 'pending' ? Colors.red : Colors.grey),
+              title: Text('Cancel Trip', style: TextStyle(color: _status == 'pending' ? Colors.red : Colors.grey)),
               onTap: () {
-                Navigator.pop(context);
-                _showCancelTripDialog();
+                Navigator.pop(context); 
+                
+                if (_status == 'pending') {
+                  _showCancelTripDialog(); 
+                } else {
+                   ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text("Cannot cancel ride after driver is assigned. Please call support."),
+                      backgroundColor: Colors.orange,
+                    )
+                  );
+                }
               },
             ),
           ],
@@ -207,9 +223,40 @@ class _OTPPageState extends State<OTPPage> {
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('No')),
           TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              Navigator.pop(context);
+            onPressed: () async {
+              Navigator.pop(context); 
+              
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Cancelling ride..."))
+              );
+
+              try {
+                FirebaseFirestore db;
+                try {
+                  db = FirebaseFirestore.instanceFor(app: Firebase.app(), databaseId: 'truxoodriver');
+                } catch (e) {
+                  db = FirebaseFirestore.instance;
+                }
+
+                await db.collection('booking_requests').doc(widget.bookingId).update({
+                  'status': 'cancelled',
+                  'cancelledBy': 'client',
+                  'cancelledAt': FieldValue.serverTimestamp(),
+                });
+
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Ride cancelled successfully."))
+                  );
+                  Navigator.of(context).popUntil((route) => route.isFirst);
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text("Failed to cancel: $e"))
+                  );
+                }
+              }
             },
             child: const Text('Yes', style: TextStyle(color: Colors.red)),
           ),
@@ -224,10 +271,9 @@ class _OTPPageState extends State<OTPPage> {
   Widget build(BuildContext context) {
     final double screenHeight = MediaQuery.of(context).size.height;
 
-    // Show loading until we have locations for the map
-    if (_isLoading) {
+    if (_isLoading || _pickupLat == null || _dropoffLat == null) {
       return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
+        body: Center(child: CircularProgressIndicator(color: Colors.black)),
       );
     }
 
@@ -241,8 +287,10 @@ class _OTPPageState extends State<OTPPage> {
                 height: screenHeight * 0.5,
                 width: double.infinity,
                 child: MapWithPolyline(
-                  pickupLocation: _pickupLocation,
-                  dropoffLocation: _dropoffLocation,
+                  pickupLat: _pickupLat!,
+                  pickupLng: _pickupLng!,
+                  dropoffLat: _dropoffLat!,
+                  dropoffLng: _dropoffLng!,
                 ),
               ),
 
@@ -280,21 +328,29 @@ class _OTPPageState extends State<OTPPage> {
                         // Header: Time & OTP
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'The driver is arriving soon.',
-                                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold), 
-                                ),
-                                SizedBox(height: 4),
-                                Text(
-                                  'Your ride is on the way',
-                                  style: TextStyle(color: Colors.grey, fontSize: 12),
-                                ),
-                              ],
+                            const Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'The driver is arriving soon.',
+                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  SizedBox(height: 4),
+                                  Text(
+                                    'Your ride is on the way',
+                                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
                             ),
+                            const SizedBox(width: 10),
                             // PIN Box
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -371,7 +427,7 @@ class _OTPPageState extends State<OTPPage> {
               backgroundColor: Colors.white,
               child: IconButton(
                 icon: const Icon(Icons.arrow_back, color: Colors.black),
-                onPressed: () => Navigator.pop(context), 
+                onPressed: () => Navigator.of(context).popUntil((route) => route.isFirst), 
               ),
             ),
           ),
@@ -408,26 +464,23 @@ class _OTPPageState extends State<OTPPage> {
               Text(
                 _driverName ?? "Searching...",
                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-              Row(
-                children: [
-                  const Icon(Icons.star, size: 14, color: Colors.amber),
-                  const Text(
-                    " 4.8", // Static rating for now
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                  ),
-                  Text(
-                    " • ${_vehicleModel ?? 'Vehicle'}",
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                  ),
-                ],
+              const SizedBox(height: 2),
+              Text(
+                "• ${_vehicleModel ?? 'Vehicle'}",
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ],
           ),
         ),
         
         // Plate Number
-        if (_truckNumber != null)
+        if (_truckNumber != null) ...[
+          const SizedBox(width: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
@@ -440,6 +493,7 @@ class _OTPPageState extends State<OTPPage> {
               style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
             ),
           ),
+        ]
       ],
     );
   }
@@ -447,27 +501,43 @@ class _OTPPageState extends State<OTPPage> {
   Widget _buildActionButtons() {
     return Row(
       children: [
+        // ====== CHAT BUTTON ======
         Expanded(
-          child: Container(
-            height: 45,
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(25),
-            ),
-            child: TextField(
-              controller: _messageController,
-              onSubmitted: (_) => _sendMessage(),
-              decoration: const InputDecoration(
-                hintText: 'Message driver...',
-                prefixIcon: Icon(Icons.message_outlined, size: 18),
-                border: InputBorder.none,
-                contentPadding: EdgeInsets.symmetric(vertical: 12),
+          child: InkWell(
+            onTap: () {
+              // ✅ FIX: Now directly opens the static ChatScreen without passing old parameters
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const ChatScreen()),
+              );
+            },
+            child: Container(
+              height: 45,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(25),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.message_outlined, size: 18, color: Colors.grey.shade600),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Message...',
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 16),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
         ),
         const SizedBox(width: 10),
-        // CALL BUTTON LINKED TO LOGIC
+        
+        // CALL BUTTON
         InkWell(
           onTap: _callDriver,
           child: Container(
@@ -481,6 +551,8 @@ class _OTPPageState extends State<OTPPage> {
           ),
         ),
         const SizedBox(width: 10),
+        
+        // OPTIONS BUTTON
         InkWell(
           onTap: _showOptionsMenu,
           child: Container(
@@ -500,7 +572,6 @@ class _OTPPageState extends State<OTPPage> {
   Widget _buildLocationSection() {
     return Column(
       children: [
-        // Pickup
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -527,8 +598,6 @@ class _OTPPageState extends State<OTPPage> {
             ),
           ],
         ),
-
-        // Drop off
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -580,11 +649,15 @@ class _OTPPageState extends State<OTPPage> {
                     Text(
                       _receiverName,
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
                     if (_receiverPhone.isNotEmpty)
                       Text(
                         _receiverPhone,
                         style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                   ],
                 ),
@@ -599,26 +672,37 @@ class _OTPPageState extends State<OTPPage> {
   Widget _buildAmountSection() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text("Total Amount", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        Text(
-          _amount,
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+        const SizedBox(width: 12), 
+        Expanded(
+          child: Text(
+            _amount,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.end,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
       ],
     );
   }
 }
 
-// ==================== REUSED MAP WIDGET ====================
+// ==================== FAST MAP WIDGET ====================
 class MapWithPolyline extends StatefulWidget {
-  final String pickupLocation;
-  final String dropoffLocation;
+  final double pickupLat;
+  final double pickupLng;
+  final double dropoffLat;
+  final double dropoffLng;
 
   const MapWithPolyline({
     super.key,
-    required this.pickupLocation,
-    required this.dropoffLocation,
+    required this.pickupLat,
+    required this.pickupLng,
+    required this.dropoffLat,
+    required this.dropoffLng,
   });
 
   @override
@@ -629,7 +713,6 @@ class _MapWithPolylineState extends State<MapWithPolyline> {
   late GoogleMapController mapController;
   late LatLng _pickupLatLng;
   late LatLng _deliveryLatLng;
-  bool _isLoading = true;
 
   Set<Polyline> polylines = {};
   Set<Marker> markers = {};
@@ -637,42 +720,12 @@ class _MapWithPolylineState extends State<MapWithPolyline> {
   @override
   void initState() {
     super.initState();
-    _initializeLocations();
-  }
-
-  Future<void> _initializeLocations() async {
-    try {
-      if (widget.pickupLocation.contains("Loading") || widget.dropoffLocation.contains("Loading")) {
-         throw Exception("Locations not ready");
-      }
-
-      List<Location> pickupLocations = await locationFromAddress(widget.pickupLocation);
-      List<Location> deliveryLocations = await locationFromAddress(widget.dropoffLocation);
-
-      if (mounted) {
-        setState(() {
-          _pickupLatLng = LatLng(pickupLocations.first.latitude, pickupLocations.first.longitude);
-          _deliveryLatLng = LatLng(deliveryLocations.first.latitude, deliveryLocations.first.longitude);
-          _isLoading = false;
-        });
-        _initializeMap();
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _pickupLatLng = const LatLng(28.7041, 77.1025);
-          _deliveryLatLng = const LatLng(28.5355, 77.3910);
-          _isLoading = false;
-        });
-        _initializeMap();
-      }
-    }
+    _pickupLatLng = LatLng(widget.pickupLat, widget.pickupLng);
+    _deliveryLatLng = LatLng(widget.dropoffLat, widget.dropoffLng);
+    _initializeMap();
   }
 
   void _initializeMap() {
-    markers.clear();
-    polylines.clear();
-
     markers.add(Marker(
       markerId: const MarkerId('pickup'),
       position: _pickupLatLng,
@@ -692,20 +745,14 @@ class _MapWithPolylineState extends State<MapWithPolyline> {
       width: 5,
       geodesic: true,
     ));
-
-    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
     return GoogleMap(
       onMapCreated: (controller) {
         mapController = controller;
-        Future.delayed(const Duration(milliseconds: 500), () {
+        Future.delayed(const Duration(milliseconds: 300), () {
           if (mounted) {
              final double minLat = [_pickupLatLng.latitude, _deliveryLatLng.latitude].reduce((a, b) => a < b ? a : b);
              final double maxLat = [_pickupLatLng.latitude, _deliveryLatLng.latitude].reduce((a, b) => a > b ? a : b);

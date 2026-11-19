@@ -1,20 +1,21 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:truxoo_client_new/client_side_home.dart';
-import 'package:truxoo_client_new/client_signup_page.dart'; // Import Signup Page
+import 'package:truxoo_client_new/client_side_home.dart'; // Adjust path if needed
+import 'package:truxoo_client_new/client_signup_page.dart'; // Adjust path if needed
 
 class OtpPage extends StatefulWidget {
   final String phoneNumber;
-  final bool isExistingUser; // Added this parameter
+  final bool isExistingUser;
   final String verificationId;
 
   const OtpPage({
     super.key,
     required this.phoneNumber,
-    required this.isExistingUser, // Require this
+    required this.isExistingUser,
     this.verificationId = '',
   });
 
@@ -26,7 +27,7 @@ class _OtpPageState extends State<OtpPage> {
   // ==================== CONFIGURATION ====================
   static const String databaseName = 'truxoodriver';
   static const int _otpLength = 6;
-
+  
   final TextEditingController _otpController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   
@@ -35,23 +36,27 @@ class _OtpPageState extends State<OtpPage> {
   int _resendCountdown = 30;
   Timer? _resendTimer;
   String? _currentVerificationId;
+  
+  // ✅ THE MAGIC GUARD: Prevents double-navigation crashes
+  bool _isSuccessHandled = false; 
+  
   late FirebaseFirestore _db;
 
   @override
   void initState() {
     super.initState();
-    // Initialize DB
+    // Initialize DB to point to the correct database
     try {
       _db = FirebaseFirestore.instanceFor(app: Firebase.app(), databaseId: databaseName);
     } catch (e) {
       _db = FirebaseFirestore.instance;
     }
-
+    
     _startResendTimer();
 
     // Trigger OTP Send immediately
     _sendFirebaseOtp();
-    
+
     Future.delayed(const Duration(milliseconds: 500), () => _focusNode.requestFocus());
   }
 
@@ -69,7 +74,6 @@ class _OtpPageState extends State<OtpPage> {
     try {
       await FirebaseAuth.instance.verifyPhoneNumber(
         phoneNumber: '+91${widget.phoneNumber}',
-        
         // A. AUTO VERIFICATION (Android only)
         verificationCompleted: (PhoneAuthCredential c) async {
           print("✅ Auto-verification Success!");
@@ -110,7 +114,7 @@ class _OtpPageState extends State<OtpPage> {
       _msg("Please wait, connecting to server...", true);
       return false;
     }
-
+    
     try {
       PhoneAuthCredential credential = PhoneAuthProvider.credential(
         verificationId: _currentVerificationId!,
@@ -138,7 +142,7 @@ class _OtpPageState extends State<OtpPage> {
   void _verifyAndLogin() async {
     final otp = _otpController.text.trim();
     if (otp.length < _otpLength) return _msg('Enter valid OTP', true);
-
+    
     setState(() => _isLoading = true);
 
     bool isValid = await _verifyFirebaseOtp(otp);
@@ -150,57 +154,72 @@ class _OtpPageState extends State<OtpPage> {
     }
   }
 
-  // 4. Handle Navigation based on isExistingUser
+  // 4. Handle Navigation (THE BULLETPROOF UID FIX)
   Future<void> _handleAuthSuccess() async {
-    // === SCENARIO 1: NEW USER ===
-    if (!widget.isExistingUser) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => CustomerRegistrationPage(phoneNumber: widget.phoneNumber)
-          ),
-        );
-      }
-      return;
-    }
+    // 🛑 STOP DOUBLE NAVIGATION: If we are already routing, do nothing!
+    if (_isSuccessHandled) return;
+    _isSuccessHandled = true; 
 
-    // === SCENARIO 2: EXISTING USER (Fetch Data & Login) ===
     try {
-      final raw = widget.phoneNumber;
-      final formatted = "+91$raw";
-      final searchNums = [raw, formatted];
-      final fields = ['phone_number', 'phoneNumber', 'phone', 'mobile'];
+      final User? user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception("Authentication failed. No user found.");
 
-      Map<String, dynamic>? data;
+      // We completely ignore "widget.isExistingUser". 
+      // Instead, we check the database for this exact UID.
+      final DocumentSnapshot userDoc = await _db.collection('clients').doc(user.uid).get();
 
-      // Find user in DB
-      for(String f in fields) {
-        if(data != null) break;
-        final query = await _db.collection('clients').where(f, whereIn: searchNums).limit(1).get();
-        if(query.docs.isNotEmpty) data = query.docs.first.data();
-      }
-
-      if (mounted) {
-        setState(() => _isLoading = false);
-        Navigator.pushAndRemoveUntil(
-          context,
-          MaterialPageRoute(builder: (context) => ClientSideHome(
-            displayName: data?['full_name'] ?? data?['name'] ?? 'User',
-            displayProfilePicture: data?['profile_photo_url'] ?? '',
-            isUsingLocalImage: false,
-            clientPhone: widget.phoneNumber,
-            clientEmail: data?['email'] ?? '',
-            companyName: data?['company_name'] ?? '',
-            companyRegNumber: data?['company_reg_number'] ?? '',
-          )),
-          (route) => false,
-        );
+      if (userDoc.exists) {
+        // === SCENARIO 1: EXISTING USER ===
+        final data = userDoc.data() as Map<String, dynamic>;
+        
+        if (mounted) {
+          setState(() => _isLoading = false);
+          
+          // Add a tiny delay to ensure the keyboard closes and the frame is clear
+          FocusScope.of(context).unfocus();
+          await Future.delayed(const Duration(milliseconds: 150));
+          
+          if (!mounted) return;
+          Navigator.pushAndRemoveUntil(
+            context,
+            MaterialPageRoute(builder: (context) => ClientSideHome(
+              displayName: data['fullName'] ?? data['full_name'] ?? data['name'] ?? 'User',
+              displayProfilePicture: data['photoUrl'] ?? data['profile_photo_url'] ?? '',
+              isUsingLocalImage: false,
+              clientPhone: widget.phoneNumber,
+              clientEmail: data['email'] ?? '',
+              companyName: data['companyName'] ?? data['company_name'] ?? '',
+              companyRegNumber: data['companyRegNumber'] ?? data['company_reg_number'] ?? '',
+            )),
+            (route) => false,
+          );
+        }
+      } else {
+        // === SCENARIO 2: BRAND NEW USER ===
+        if (mounted) {
+          setState(() => _isLoading = false);
+          
+          FocusScope.of(context).unfocus();
+          await Future.delayed(const Duration(milliseconds: 150));
+          
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => CustomerRegistrationPage(phoneNumber: widget.phoneNumber)
+            ),
+          );
+        }
       }
     } catch (e) {
-      _msg("Data Load Error: $e", true);
-      setState(() => _isLoading = false);
+      print("❌ Data Fetch Error: $e");
+      await FirebaseAuth.instance.signOut(); 
+      _isSuccessHandled = false; // Release the lock if it failed
+      
+      if (mounted) {
+        setState(() => _isLoading = false);
+        _msg("Failed to load profile. Please try logging in again.", true);
+      }
     }
   }
 
@@ -215,7 +234,6 @@ class _OtpPageState extends State<OtpPage> {
   void _resendOtp() {
     setState(() => _isLoading = true);
     _sendFirebaseOtp();
-    
     Future.delayed(const Duration(seconds: 1), () {
       setState(() { _isLoading = false; _resendCountdown = 30; _canResend = false; });
       _startResendTimer();
@@ -254,7 +272,7 @@ class _OtpPageState extends State<OtpPage> {
               onChanged: (val) { if(val.length == _otpLength) _verifyAndLogin(); },
             ),
             const SizedBox(height: 30),
-            _isLoading 
+            _isLoading
               ? const CircularProgressIndicator()
               : ElevatedButton(
                   onPressed: _currentVerificationId == null ? null : _verifyAndLogin,
